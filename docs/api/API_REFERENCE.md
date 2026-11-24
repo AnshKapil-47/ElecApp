@@ -23,6 +23,7 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
   - `MOBILE` client login restricted exclusively to `AGENT`, `CUSTOMER`, and `SUBUSER`.
   - Session limits: OWNER/SUBOWNER = 1 active web session. Mobile users = 1 active mobile session per device.
   - Concurrency handled via `SELECT ... FOR UPDATE` row locks.
+  - **Device Replacement Protection:** If an active device is already registered and a login is attempted from a different installation ID, returns HTTP 403 Forbidden (`DEVICE_CHANGE_NOT_ALLOWED`). Device replacement is blocked until explicitly revoked by an authorized role.
 - **Response (200 OK):**
   ```json
   {
@@ -61,6 +62,14 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
 ### 1.3 Mobile Refresh Token Rotation
 - **Endpoint:** `POST /api/v1/auth/refresh`
 - **Access:** Public (Mobile only)
+- **Mandatory Headers (Device Proof):**
+  - `X-Device-Id`: Registered Device UUID
+  - `X-Device-Signature`: Base64 ECDSA P-256 signature
+  - `X-Device-Timestamp`: ISO-8601 or epoch millis timestamp (within ±5 min window)
+  - `X-Device-Nonce`: Unique cryptographic nonce
+  - `X-Device-Counter`: Monotonically increasing counter
+- **Signed Canonical String:**
+  `POST\n/api/v1/auth/refresh\n{timestamp}\n{nonce}\n{counter}\n{bodySha256Hex}`
 - **Request Body:**
   ```json
   {
@@ -70,6 +79,8 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
   ```
 - **Rules Enforced:**
   - Immediate rotation: old refresh token invalidated upon use.
+  - Device proof mandatory: ECDSA P-256 signature verified against device public key.
+  - Device binding match: device ID must match session's registered device.
   - Replay / Reuse Detection: If an already-used refresh token is presented, all active sessions for that user on that device are immediately terminated (`REFRESH_TOKEN_REUSE`).
 
 ### 1.4 Logout
@@ -109,6 +120,27 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
 - **Rules Enforced:**
   - Verifies ECDSA P-256 signature against stored device public key.
   - Promotes device status to `ACTIVE`.
+  - Invalidates single-use registration token JTI with advisory lock durability.
+
+### 2.3 Device Revocation
+- **Endpoint:** `POST /api/v1/devices/{deviceId}/revoke`
+- **Access:** Authenticated (`OWNER`, `SUBOWNER`, `AGENT`, `CUSTOMER`)
+- **Request Body:**
+  ```json
+  {
+    "reason": "Device lost or replaced"
+  }
+  ```
+- **Role Authorization Matrix:**
+  - `OWNER` / `SUBOWNER`: Can revoke any registered device across the platform.
+  - `AGENT`: Can revoke devices of their assigned customers or customer subusers.
+  - `CUSTOMER`: Can revoke devices of their subordinate `SUBUSER`s (cannot revoke own device).
+  - `SUBUSER`: Forbidden (HTTP 403).
+- **Rules Enforced:**
+  - Transitions device to `REVOKED`.
+  - Cascades revocation to all active sessions on that device (`TERMINATED` with `DEVICE_REVOKED`).
+  - Cascades revocation to all active offline leases on that device (`REVOKED`).
+  - Logs `DEVICE_REVOCATION` audit entry.
 
 ---
 

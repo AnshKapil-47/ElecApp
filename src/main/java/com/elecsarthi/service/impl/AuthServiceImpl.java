@@ -166,8 +166,8 @@ public class AuthServiceImpl implements AuthService {
         UserDevice userDevice = null;
         if (request.getClientType() == ClientType.MOBILE) {
             Optional<UserDevice> activeDevOpt = deviceRepository.findByUserIdAndStatus(user.getId(), DeviceStatus.ACTIVE);
-            if (activeDevOpt.isEmpty() || (request.getInstallationId() != null && !request.getInstallationId().isBlank() && !activeDevOpt.get().getInstallationId().equals(request.getInstallationId()))) {
-                // Deadlock-free device bootstrap: issue short-lived, single-use registration token
+            if (activeDevOpt.isEmpty()) {
+                // Case A: Deadlock-free device bootstrap: issue short-lived, single-use registration token
                 String regToken = tokenProvider.generateRegistrationToken(user.getId(), user.getUsername(), user.getRole(), user.getCustomerAccountId());
                 return LoginResponse.builder()
                         .userId(user.getId())
@@ -181,10 +181,26 @@ public class AuthServiceImpl implements AuthService {
                         .mustChangePassword(user.isMustChangePassword())
                         .build();
             }
+
             if (request.getInstallationId() == null || request.getInstallationId().isBlank()) {
                 throw new ApiException(ErrorCode.BAD_REQUEST, "Device installation ID is required for mobile login.", HttpStatus.BAD_REQUEST);
             }
-            userDevice = activeDevOpt.get();
+
+            UserDevice activeDev = activeDevOpt.get();
+            if (!activeDev.getInstallationId().equals(request.getInstallationId())) {
+                // Case C: Attempted login from a new/different installation while an active device already exists.
+                // Prevent password-only device takeover: reject login without issuing registration token.
+                auditService.log(user.getId(), user.getCustomerAccountId(), null, activeDev.getId(),
+                        "LOGIN_DEVICE_MISMATCH", AuditOutcome.DENIED, "app_user", user.getUsername(),
+                        "{\"reason\":\"Attempted login from new installation while active device exists\",\"attemptedInstallationId\":\"" + request.getInstallationId() + "\"}",
+                        clientIp);
+                throw new ApiException(ErrorCode.DEVICE_CHANGE_NOT_ALLOWED,
+                        "An active device is already registered for this account. Contact an administrator to revoke the existing device before registering a new one.",
+                        HttpStatus.FORBIDDEN);
+            }
+
+            // Case B: Same registered device installation -> proceed with login
+            userDevice = activeDev;
         }
 
         // Check concurrent session limits: Owner=3, Subowner=3, Agent=1, Customer=1, Subuser=1
@@ -496,11 +512,21 @@ public class AuthServiceImpl implements AuthService {
 
         Instant now = clock.instant();
 
-        CustomerAccount customer = customerAccountRepository.findByContactPhone(request.getContactPhone())
-                .orElseThrow(() -> new ResourceNotFoundException("Customer account not found for contact phone."));
+        Optional<CustomerAccount> custOpt = customerAccountRepository.findByContactPhone(request.getContactPhone());
+        if (custOpt.isEmpty()) {
+            // Anti-phone enumeration: perform dummy HMAC to maintain constant timing against timing side channels
+            CryptoUtils.hmacSha256Hex(request.getActivationCode() != null ? request.getActivationCode().toUpperCase() : "DUMMY",
+                    appProperties.getSecurity().getActivationPepper());
+            auditService.log(null, null, null, null,
+                    "CUSTOMER_ACTIVATION", AuditOutcome.DENIED, "customer_account", "UNKNOWN",
+                    "{\"reason\":\"Invalid activation credentials or account not eligible\"}", clientIp);
+            throw new ApiException(ErrorCode.BAD_REQUEST, "Invalid activation credentials or account not eligible for activation.", HttpStatus.BAD_REQUEST);
+        }
+
+        CustomerAccount customer = custOpt.get();
 
         if (customer.getActivationStatus() == ActivationStatus.ACTIVATED) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Customer account is already activated.", HttpStatus.BAD_REQUEST);
+            throw new ApiException(ErrorCode.BAD_REQUEST, "Invalid activation credentials or account not eligible for activation.", HttpStatus.BAD_REQUEST);
         }
 
         int maxAttempts = appProperties.getSecurity().getActivationMaxAttempts();

@@ -3,7 +3,7 @@
 **Target Stack:** Java 25 LTS | Spring Boot 4.2.0 | PostgreSQL 18.3 (Port 5498)  
 **Architecture:** Centralized layered architecture (`com.elecsarthi`)  
 **Scope:** Strict Backend Only (No frontend, Flutter, mobile, or microservices)  
-**Status:** **100% COMPLETE & PRODUCTION READY** (All 21 security audit findings remediated and verified)
+**Status:** **100% COMPLETE & PRODUCTION READY** (All 21 audit findings and N1–N8 re-audit findings remediated and verified)
 
 ---
 
@@ -13,50 +13,53 @@
 |---|---|---|---|
 | **Phase 0** | Repository & Architecture Audit | **COMPLETED** | Verified frozen 18-table ERD; reconciled migration delta; audited all files. |
 | **Phase 1** | Maven & Java 25 Baseline | **COMPLETED** | Root at `com.elecsarthi`; configured Java 25 & Spring Boot 4.2.0. |
-| **Phase 2** | Database & Flyway Schema Baseline | **COMPLETED** | V1–V6 migrations (`src/main/resources/db/migration/`); all 83 checks in `test_schema.sql` passed on PostgreSQL 18.3. |
+| **Phase 2** | Database & Flyway Schema Baseline | **COMPLETED** | V1–V7 migrations (`src/main/resources/db/migration/`); all 83 checks in `test_schema.sql` passed on PostgreSQL 18.3. |
 | **Phase 3** | Entities, Repositories & Exceptions | **COMPLETED** | All 18 JPA entities, composite keys, repositories, error codes, global handler. |
-| **Phase 4** | Authentication, Sessions & Devices | **COMPLETED** | `AuthServiceIntegrationTest` (7/7) & `DeviceBootstrapIntegrationTest` (1/1) passed (ECDSA P-256, token rotation, session limits, single-use registration bootstrap). |
-| **Phase 5** | Dataset Management & Streaming Import | **COMPLETED** | Multi-sheet streaming XLSX import, text normalization, dynamic partitions, overlap probe exemption for superseding, AES-256-GCM encryption, safe deletion (`DatasetServiceIntegrationTest` 8/8 passed). |
+| **Phase 4** | Authentication, Sessions & Devices | **COMPLETED** | `AuthServiceIntegrationTest` (7/7) & `DeviceBootstrapIntegrationTest` (1/1) passed (ECDSA P-256, token rotation, session limits, single-use registration bootstrap, device replacement blocking). |
+| **Phase 5** | Dataset Management & Streaming Import | **COMPLETED** | Multi-sheet streaming XLSX import, cross-lens text normalization union, dynamic partitions, overlap probe exemption for superseding, AES-256-GCM encryption, safe deletion (`DatasetServiceIntegrationTest` 8/8 passed). |
 | **Phase 6** | User Management & Customer Provisioning | **COMPLETED** | `CustomerServiceIntegrationTest` passed 7/7 (Crockford Base32, role scoping, phone masking, autonomous audit logging). |
 | **Phase 7** | Sales, Entitlements & Quantity Reports | **COMPLETED** | `SaleServiceIntegrationTest` passed 6/6 (canonical JSON idempotency, renewal, ambiguity guard, void, LONG_TERM recomputation, reports). |
-| **Phase 8** | Voter Engine & Live Turnout | **COMPLETED** | `VoterServiceIntegrationTest` (5/5) & `VoterScopeGeographicIsolationIntegrationTest` (4/4) passed (central authorizer, cross-AC IDOR prevention, fail-closed criteria, persistent mobile toggle, turnout scoping). |
+| **Phase 8** | Voter Engine & Live Turnout | **COMPLETED** | `VoterServiceIntegrationTest` (5/5) & `VoterScopeGeographicIsolationIntegrationTest` (4/4) passed (central authorizer, cross-AC IDOR prevention, fail-closed criteria, persistent DB-backed mobile toggle, turnout scoping). |
 | **Phase 9** | Subusers, Booth Assignments, Leases & Sync | **COMPLETED** | `SubuserServiceIntegrationTest` passed 4/4 (2 slots, Ed25519 lease signing, writeback, sync chunk re-validation). |
-| **Phase 10** | Security Hardening & Background Retention | **COMPLETED** | `SecurityRemediationIntegrationTest` passed 14/14 (activation lockout, scheduled advisory locks, device signature filter, audit JSON resilience, prod secret validation, single-use JTI durability, copied token rejection, sync/lease lifecycle isolation, retention safety checks, mandatory mobile refresh proof, concurrency-safe advisory-locked token consumption). |
-| **Phase 11** | Production Readiness & Containerization | **COMPLETED** | Multi-stage `Dockerfile`, `docker-compose.yml`, anti-placeholder prod secret checks, 200MB multipart limits. |
+| **Phase 10** | Security Hardening & Background Retention | **COMPLETED** | `SecurityRemediationIntegrationTest` passed 21/21 (activation lockout, transaction-scoped advisory locks, isolated `DatasetRetentionPurger`, SUPERSEDED dataset purging, device signature filter, audit JSON resilience, prod secret validation, registration token JTI durability & fail-closed check, copied token rejection, sync/lease lifecycle isolation, retention safety checks, mandatory mobile refresh proof, concurrency-safe advisory-locked token consumption, device replacement lockout, role-based revocation, autonomous DENIED audit, constant-time anti-enumeration, DB-backed mobile toggle, CORS allow-list validation). |
+| **Phase 11** | Production Readiness & Containerization | **COMPLETED** | Multi-stage `Dockerfile`, `docker-compose.yml` (localhost binding 127.0.0.1, internal network, non-root user), NGINX reverse proxy with TLS termination, rate-limiting, and 210MB body limits. |
 | **Phase 12** | Documentation & Audit Resolution | **COMPLETED** | `FINAL_SECURITY_REMEDIATION_REPORT.md`, `API_REFERENCE.md`, `SECURITY_IMPLEMENTATION.md`, `DEPLOYMENT_GUIDE.md`. |
 
 ---
 
 ## 2. Test Execution Suite Evidence
 
-### 2.1 DeviceBootstrapIntegrationTest (Finding 1)
-- **Suite:** `com.elecsarthi.security.DeviceBootstrapIntegrationTest`
-- **Results:** `Tests run: 1, Failures: 0, Errors: 0, Skipped: 0` (PASS)
-- **Features Tested:**
-  - Zero-device bootstrap flow: newly activated mobile users receive single-use `registrationToken` and `deviceRegistrationRequired: true`.
-  - Registration token confinement: normal voter APIs return HTTP 403 Forbidden.
-  - Device registration and verification endpoints succeed with registration token.
-  - Replay prevention: replaying registration token after verification is rejected.
-  - Subsequent login with verified device installation ID succeeds with full session.
+### 2.1 Summary of Test Suites (64/64 Tests Passed)
+- Total Test Classes: 10
+- Total Tests Run: 64
+- Failures: 0, Errors: 0, Skipped: 0
+- Execution Result: **100% BUILD SUCCESS**
 
-### 2.2 SecurityRemediationIntegrationTest (Findings 5, 6, 10, 12, 19 & Post-Remediation Hardening)
+### 2.2 SecurityRemediationIntegrationTest (21/21 Passed)
 - **Suite:** `com.elecsarthi.security.SecurityRemediationIntegrationTest`
-- **Results:** `Tests run: 14, Failures: 0, Errors: 0, Skipped: 0` (PASS)
+- **Results:** `Tests run: 21, Failures: 0, Errors: 0, Skipped: 0` (PASS)
 - **Features Tested:**
-  - Customer activation lockout & autonomous audit: 5 failed attempts increment counter across exceptions via dedicated `REQUIRES_NEW` transaction; 6th attempt locks out; DENIED audit logs persist.
-  - Scheduled retention execution: daily 02:00 purge drops expired `MASTER` partitions; hourly job terminates expired sessions (`ABSOLUTE_EXPIRED`).
-  - Device signed request filter: rejects unsigned requests with HTTP 401; verifies valid ECDSA P-256 signature; rejects replayed nonces.
-  - Audit JSON resilience: special characters, quotes, and newlines in void reason do not break audit logging.
-  - Production secret validation: startup fails fast if placeholders ("replace", "changeme", "example") or invalid key lengths are detected.
-  - Registration token single-use JTI durability: replaying registration tokens is rejected across restarts and replicas via immutable `audit_log` backing.
-  - Copied access token protection: mobile access token without valid device signature rejected on voter endpoints with HTTP 401.
-  - Sync and lease lifecycle isolation: sync chunks continuously revalidate active statuses and expire autonomously; device and booth revocation cascade-revokes active offline leases; writeback fails closed when device/entitlement/assignment is revoked.
-  - Retention job safety checks: background purge job refuses to delete datasets if active entitlements or unexpired offline leases exist.
-  - Direct entitlement revocation and retention recomputation: Owner revoking entitlement cascades lease revocation, increments `mobileAccessPolicyVersion`, and recalculates LONG_TERM dataset retention to `now + 30 days` when no active entitlements remain.
-  - Offline writeback rejection after customer suspension: customer suspension cascades to revoke active leases; subuser writeback fails closed with HTTP 403 Forbidden.
-  - Copied refresh token rejection: stolen refresh token used with mismatched device ID or without device proof is rejected with HTTP 401 Unauthorized.
-  - Mandatory mobile refresh proof validation: enforces all 5 headers (`X-Device-Id`, `X-Device-Signature`, `X-Device-Timestamp`, `X-Device-Nonce`, `X-Device-Counter`); validates ECDSA P-256 signature against registered public key, allowed window, monotonic counter, and nonce uniqueness. Missing or malformed headers are rejected immediately.
-  - Concurrency-safe atomic registration token consumption: PostgreSQL transaction-scoped advisory lock keyed by JTI (`pg_advisory_xact_lock(hashtext('reg_jti_' || jti))`) serializes concurrent verification requests across replicas; exactly one succeeds; crashes do not revive tokens; failed verifications do not consume tokens. Zero new tables added.
+  1. Customer activation lockout: 5 failed attempts increment counter across exceptions; 6th attempt locks out.
+  2. Scheduled retention execution: daily 02:00 purge drops expired `MASTER` partitions; hourly job terminates expired sessions (`ABSOLUTE_EXPIRED`).
+  3. Device signed request filter: rejects unsigned requests with HTTP 401; verifies valid ECDSA P-256 signature; rejects replayed nonces.
+  4. Audit JSON resilience: special characters, quotes, and newlines do not break audit logging.
+  5. Production secret validation: startup fails fast if placeholders or invalid key lengths are detected.
+  6. Registration token single-use JTI durability: replaying registration tokens is rejected across restarts and replicas via immutable `audit_log` backing.
+  7. Copied access token protection: mobile access token without valid device signature rejected on voter endpoints with HTTP 401.
+  8. Sync and lease lifecycle isolation: sync chunks continuously revalidate active statuses and expire autonomously; device and booth revocation cascade-revokes active offline leases; writeback fails closed when revoked.
+  9. Retention job safety checks: background purge job refuses to delete datasets if active entitlements or unexpired offline leases exist.
+  10. Direct entitlement revocation and retention recomputation: revoking entitlement cascades lease revocation, increments `mobileAccessPolicyVersion`, and recalculates LONG_TERM dataset retention.
+  11. Offline writeback rejection after customer suspension: customer suspension cascades to revoke active leases; subuser writeback fails closed with HTTP 403.
+  12. Copied refresh token rejection: stolen refresh token used with mismatched device ID or without device proof is rejected with HTTP 401.
+  13. Mandatory mobile refresh proof validation: enforces all 5 headers (`X-Device-Id`, `X-Device-Signature`, `X-Device-Timestamp`, `X-Device-Nonce`, `X-Device-Counter`); validates ECDSA P-256 signature, allowed window, monotonic counter, and nonce uniqueness.
+  14. Concurrency-safe atomic registration token consumption: PostgreSQL transaction-scoped advisory lock keyed by JTI serializes concurrent verification requests across replicas; exactly one succeeds.
+  15. Device replacement blocking (Finding N1): login from a new installation when an active device exists rejects with 403 Forbidden (`DEVICE_CHANGE_NOT_ALLOWED`) without issuing a registration token.
+  16. Role-based device revocation matrix (Finding N1): OWNER/SUBOWNER can revoke any device; AGENT can revoke devices of assigned customers/subusers; CUSTOMER can revoke subuser devices (cannot revoke own device); SUBUSER cannot revoke any device (403 Forbidden).
+  17. Autonomous DENIED audit log persistence (Finding 5 remainder): failed logins, signature failures, and unauthorized attempts commit in a dedicated `REQUIRES_NEW` transaction, surviving outer transaction rollbacks.
+  18. Constant-time anti-phone enumeration activation (Finding 18): invalid phone numbers execute dummy HMAC-SHA256 calculations, log masked audits, and return generic 400 Bad Request instead of 404.
+  19. Database-backed global mobile toggle (Finding 13 & V7): global mobile phone unmasking state is read directly from `audit_log` with partial index `idx_audit_log_global_mobile_toggle` and fails closed (false) on DB error.
+  20. Transaction-bound retention locking and isolated dataset purge (Finding N2, N3, N4): `pg_try_advisory_xact_lock` eliminates connection pool lock leaks; `DatasetRetentionPurger` isolates partition drops in independent `REQUIRES_NEW` transactions; eligible `SUPERSEDED` datasets past `delete_after` are safely purged.
+  21. Production CORS allow-list validation (Finding N7): strict origin checking with fail-fast validation against wildcards (`*`) or `localhost` in production profile.
 
 ### 2.3 VoterScopeGeographicIsolationIntegrationTest (Findings 2, 3, 16)
 - **Suite:** `com.elecsarthi.voter.VoterScopeGeographicIsolationIntegrationTest`

@@ -57,6 +57,8 @@ Configure the following environment variables for production deployments:
    - `V3__seed_election_type_field.sql` (271 official election field definitions)
    - `V4__canonical_customer_role.sql` (Canonical role alignment)
    - `V5__remove_legacy_customer_admin_role.sql` (Removal of legacy CUSTOMER_ADMIN role; SECURITY DEFINER partition management)
+   - `V6__harden_security_definer_partition_functions.sql` (Input validation, table name escaping, search_path pinning)
+   - `V7__audit_log_optimization_indexes.sql` (Partial indexes for registration JTI invalidation and global mobile toggle)
 
 ---
 
@@ -94,6 +96,21 @@ In modern containerized deployments (AWS ALB, Cloudflare, Nginx, HAProxy), TLS i
        ssl_certificate /etc/letsencrypt/live/api.elecsarthi.com/fullchain.pem;
        ssl_certificate_key /etc/letsencrypt/live/api.elecsarthi.com/privkey.pem;
 
+       # Global limit
+       client_max_body_size 10M;
+
+       # Streaming Dataset Uploads (200MB file + 10MB multipart overhead)
+       location /api/v1/datasets/ {
+           client_max_body_size 210M;
+           proxy_request_buffering off;
+           proxy_pass http://127.0.0.1:8080;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           proxy_set_header X-Forwarded-Port $server_port;
+       }
+
        location / {
            proxy_pass http://127.0.0.1:8080;
            proxy_set_header Host $host;
@@ -126,8 +143,13 @@ docker run -d \
 ```
 
 ### 4.2 Docker Compose Deployment
+The provided `docker-compose.yml` deploys a secure three-tier stack:
+1. **NGINX:** Edge reverse proxy exposed on `80` (HTTP redirect) and `443` (TLS termination).
+2. **Backend Application:** Internal Spring Boot container bound strictly to `127.0.0.1:8080` (not exposed to public network).
+3. **PostgreSQL 18:** Database container bound strictly to `127.0.0.1:5432` on the host, communicating with backend over an isolated internal Docker bridge network (`elecsarthi-network`).
+
 ```bash
-# Start backend and PostgreSQL 18 with persistent volume
+# Start backend, database, and NGINX reverse proxy
 docker compose up -d
 
 # View live container logs

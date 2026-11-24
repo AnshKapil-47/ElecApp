@@ -5,6 +5,7 @@ import com.elecsarthi.enums.Role;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -15,6 +16,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.UUID;
 
+@Slf4j
 @Component
 public class JwtTokenProvider {
 
@@ -94,9 +96,11 @@ public class JwtTokenProvider {
                 invalidatedRegistrationJtis.add(jti);
                 return true;
             }
-        } catch (Exception ignored) {
+            return false;
+        } catch (Exception e) {
+            log.error("Database error while checking registration JTI invalidation; failing closed to reject token replay: {}", e.getMessage());
+            return true; // Fail closed: treat as invalid on error to prevent token replay
         }
-        return false;
     }
 
     public Claims parseClaims(String token) {

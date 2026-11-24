@@ -7,8 +7,10 @@ import com.elecsarthi.service.AuditService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.Map;
@@ -19,10 +21,13 @@ import java.util.UUID;
 public class AuditServiceImpl implements AuditService {
 
     private final AuditLogRepository auditLogRepository;
+    private final TransactionTemplate requiresNewTxTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public AuditServiceImpl(AuditLogRepository auditLogRepository) {
+    public AuditServiceImpl(AuditLogRepository auditLogRepository, PlatformTransactionManager transactionManager) {
         this.auditLogRepository = auditLogRepository;
+        this.requiresNewTxTemplate = new TransactionTemplate(transactionManager);
+        this.requiresNewTxTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     @Override
@@ -65,7 +70,12 @@ public class AuditServiceImpl implements AuditService {
                 .createdAt(Instant.now())
                 .build();
 
-        auditLogRepository.save(auditLog);
+        // Security requirement: DENIED audit events must survive caller transaction rollback
+        if (outcome == AuditOutcome.DENIED) {
+            requiresNewTxTemplate.executeWithoutResult(status -> auditLogRepository.save(auditLog));
+        } else {
+            auditLogRepository.save(auditLog);
+        }
     }
 
     @Override

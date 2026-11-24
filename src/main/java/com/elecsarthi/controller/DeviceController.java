@@ -54,13 +54,13 @@ public class DeviceController {
     }
 
     @PostMapping("/{deviceId}/revoke")
-    @PreAuthorize("hasRole('OWNER')")
-    @Operation(summary = "Revoke device", description = "Owner-only operation to revoke an active device and terminate its sessions")
+    @PreAuthorize("hasAnyRole('OWNER', 'SUBOWNER', 'AGENT', 'CUSTOMER')")
+    @Operation(summary = "Revoke device", description = "Role-authorized operation to revoke an active device and terminate its sessions")
     public ResponseEntity<Map<String, String>> revokeDevice(@PathVariable UUID deviceId,
                                                             @AuthenticationPrincipal ElecSarthiUserPrincipal principal,
                                                             HttpServletRequest httpRequest) {
         String clientIp = httpRequest.getRemoteAddr();
-        deviceService.revokeDevice(deviceId, principal.getUserId(), clientIp);
+        deviceService.revokeDevice(deviceId, principal.getUserId(), principal.getRole(), clientIp);
         return ResponseEntity.ok(Map.of("message", "Device revoked successfully"));
     }
 }

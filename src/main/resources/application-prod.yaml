@@ -27,6 +27,11 @@ server:
     max-swallow-size: 210MB
 
 elecsarthi:
+  cors:
+    allowed-origins:
+      - "https://console.elecsarthi.com"
+      - "https://admin.elecsarthi.com"
+    allow-credentials: false
   mobile-numbers-enabled: ${MOBILE_NUMBERS_ENABLED:false}
   jwt:
     issuer: elecsarthi-auth

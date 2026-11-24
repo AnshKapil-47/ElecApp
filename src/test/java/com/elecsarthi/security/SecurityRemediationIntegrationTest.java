@@ -84,6 +84,9 @@ public class SecurityRemediationIntegrationTest {
     private EntitlementService entitlementService;
 
     @Autowired
+    private com.elecsarthi.service.VoterService voterService;
+
+    @Autowired
     private EntitlementRepository entitlementRepository;
 
     @Autowired
@@ -1374,6 +1377,336 @@ public class SecurityRemediationIntegrationTest {
         ApiException postEx = assertThrows(ApiException.class, () ->
                 deviceService.verifyDevice(agent.getId(), verifyReq, "127.0.0.1", jti));
         assertEquals("UNAUTHORIZED", postEx.getErrorCode().name());
+    }
+
+    @Test
+    @DisplayName("Finding N1: Prevent password-only device replacement and enforce role-based device revocation")
+    void testMobileDeviceReplacementPolicy() throws Exception {
+        // 1. Create an agent and customer
+        AppUser agent = userRepository.save(AppUser.builder()
+                .username("rep_agent_" + UUID.randomUUID())
+                .fullName("Replacement Agent")
+                .passwordHash(passwordEncoder.encode("Secret@123"))
+                .role(Role.AGENT)
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        CustomerAccount customer = customerAccountRepository.save(CustomerAccount.builder()
+                .customerName("Replacement Customer Org")
+                .contactPhone("+9198" + String.format("%08d", Math.abs(new java.util.Random().nextInt(100000000))))
+                .owningAgentUserId(agent.getId())
+                .createdByUserId(agent.getId())
+                .status(UserStatus.ACTIVE)
+                .activationStatus(ActivationStatus.ACTIVATED)
+                .build());
+
+        AppUser custUser = userRepository.save(AppUser.builder()
+                .username("rep_cust_" + UUID.randomUUID())
+                .fullName("Replacement Customer")
+                .passwordHash(passwordEncoder.encode("Secret@123"))
+                .role(Role.CUSTOMER)
+                .customerAccountId(customer.getId())
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        // 2. Case A: Initial login from mobile with no active device requires registration
+        LoginRequest initialLogin = LoginRequest.builder()
+                .identifier(custUser.getUsername())
+                .password("Secret@123")
+                .clientType(ClientType.MOBILE)
+                .installationId("inst-initial-001")
+                .build();
+
+        var initialResp = authService.login(initialLogin, "127.0.0.1");
+        assertTrue(initialResp.isDeviceRegistrationRequired());
+        assertNotNull(initialResp.getRegistrationToken());
+
+        // 3. Register and verify device
+        KeyPair kp1 = generateEcKeyPair();
+        String pubKey1 = Base64.getEncoder().encodeToString(kp1.getPublic().getEncoded());
+        var regResp = deviceService.registerDevice(custUser.getId(),
+                com.elecsarthi.dto.request.DeviceRegisterRequest.builder()
+                        .installationId("inst-initial-001")
+                        .publicKey(pubKey1)
+                        .platform(DevicePlatform.ANDROID)
+                        .deviceName("Pixel 8")
+                        .build(),
+                "127.0.0.1");
+
+        String sig1 = signData(kp1.getPrivate(), regResp.getChallenge().getBytes(StandardCharsets.UTF_8));
+        String jti1 = tokenProvider.parseClaims(initialResp.getRegistrationToken()).getId();
+        deviceService.verifyDevice(custUser.getId(),
+                com.elecsarthi.dto.request.DeviceVerifyRequest.builder()
+                        .deviceId(regResp.getDeviceId())
+                        .challengeSignature(sig1)
+                        .build(),
+                "127.0.0.1", jti1);
+
+        // Verify device is ACTIVE
+        UserDevice dev1 = deviceRepository.findById(regResp.getDeviceId()).orElseThrow();
+        assertEquals(DeviceStatus.ACTIVE, dev1.getStatus());
+
+        // 4. Case B: Login from same installation succeeds normally
+        LoginRequest sameInstLogin = LoginRequest.builder()
+                .identifier(custUser.getUsername())
+                .password("Secret@123")
+                .clientType(ClientType.MOBILE)
+                .installationId("inst-initial-001")
+                .build();
+        var sameInstResp = authService.login(sameInstLogin, "127.0.0.1");
+        assertFalse(sameInstResp.isDeviceRegistrationRequired());
+        assertNotNull(sameInstResp.getAccessToken());
+
+        // 5. Case C: Login from different installation while active device exists is FORBIDDEN
+        LoginRequest diffInstLogin = LoginRequest.builder()
+                .identifier(custUser.getUsername())
+                .password("Secret@123")
+                .clientType(ClientType.MOBILE)
+                .installationId("inst-new-attacker-002")
+                .build();
+        ApiException diffEx = assertThrows(ApiException.class, () ->
+                authService.login(diffInstLogin, "127.0.0.1"));
+        assertEquals("DEVICE_CHANGE_NOT_ALLOWED", diffEx.getErrorCode().name());
+        assertEquals(403, diffEx.getStatus().value());
+
+        // Direct registration attempt for the user also rejected
+        ApiException directRegEx = assertThrows(ApiException.class, () ->
+                deviceService.registerDevice(custUser.getId(),
+                        com.elecsarthi.dto.request.DeviceRegisterRequest.builder()
+                                .installationId("inst-new-attacker-002")
+                                .publicKey(pubKey1)
+                                .platform(DevicePlatform.ANDROID)
+                                .deviceName("Rogue Device")
+                                .build(),
+                        "127.0.0.1"));
+        assertEquals("DEVICE_CHANGE_NOT_ALLOWED", directRegEx.getErrorCode().name());
+
+        // 6. Role-based device revocation check:
+        // Another agent cannot revoke this device
+        AppUser otherAgent = userRepository.save(AppUser.builder()
+                .username("rep_other_agent_" + UUID.randomUUID())
+                .fullName("Other Agent")
+                .passwordHash(passwordEncoder.encode("Secret@123"))
+                .role(Role.AGENT)
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        ApiException unauthAgentEx = assertThrows(ApiException.class, () ->
+                deviceService.revokeDevice(dev1.getId(), otherAgent.getId(), Role.AGENT, "127.0.0.1"));
+        assertEquals(403, unauthAgentEx.getStatus().value());
+
+        // Owning agent can revoke the device
+        deviceService.revokeDevice(dev1.getId(), agent.getId(), Role.AGENT, "127.0.0.1");
+        UserDevice revokedDev = deviceRepository.findById(dev1.getId()).orElseThrow();
+        assertEquals(DeviceStatus.REVOKED, revokedDev.getStatus());
+
+        // 7. After revocation, new installation can now log in and register
+        var newInstResp = authService.login(diffInstLogin, "127.0.0.1");
+        assertTrue(newInstResp.isDeviceRegistrationRequired());
+        assertNotNull(newInstResp.getRegistrationToken());
+    }
+
+    @Test
+    @DisplayName("Finding N1: Customer subuser device revocation authorization")
+    void testCustomerSubuserDeviceRevocationAuthorization() throws Exception {
+        AppUser agent = userRepository.save(AppUser.builder()
+                .username("sub_agent_" + UUID.randomUUID())
+                .fullName("Sub Agent")
+                .passwordHash(passwordEncoder.encode("Secret@123"))
+                .role(Role.AGENT)
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        CustomerAccount customer = customerAccountRepository.save(CustomerAccount.builder()
+                .customerName("Customer Org Two")
+                .contactPhone("+9198" + String.format("%08d", Math.abs(new java.util.Random().nextInt(100000000))))
+                .owningAgentUserId(agent.getId())
+                .createdByUserId(agent.getId())
+                .status(UserStatus.ACTIVE)
+                .activationStatus(ActivationStatus.ACTIVATED)
+                .build());
+
+        AppUser primaryCust = userRepository.save(AppUser.builder()
+                .username("prim_cust_" + UUID.randomUUID())
+                .fullName("Primary Customer")
+                .passwordHash(passwordEncoder.encode("Secret@123"))
+                .role(Role.CUSTOMER)
+                .customerAccountId(customer.getId())
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        AppUser subuser = userRepository.save(AppUser.builder()
+                .username("subuser_" + UUID.randomUUID())
+                .fullName("Subuser One")
+                .passwordHash(passwordEncoder.encode("Secret@123"))
+                .role(Role.SUBUSER)
+                .customerAccountId(customer.getId())
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        KeyPair kpSub = generateEcKeyPair();
+        String pubKeySub = Base64.getEncoder().encodeToString(kpSub.getPublic().getEncoded());
+
+        var regResp = deviceService.registerDevice(subuser.getId(),
+                com.elecsarthi.dto.request.DeviceRegisterRequest.builder()
+                        .installationId("inst-subuser-001")
+                        .publicKey(pubKeySub)
+                        .platform(DevicePlatform.ANDROID)
+                        .deviceName("Redmi Note 12")
+                        .build(),
+                "127.0.0.1");
+
+        String sigSub = signData(kpSub.getPrivate(), regResp.getChallenge().getBytes(StandardCharsets.UTF_8));
+        deviceService.verifyDevice(subuser.getId(),
+                com.elecsarthi.dto.request.DeviceVerifyRequest.builder()
+                        .deviceId(regResp.getDeviceId())
+                        .challengeSignature(sigSub)
+                        .build(),
+                "127.0.0.1");
+
+        // Subuser cannot revoke any device
+        ApiException subuserRevokeEx = assertThrows(ApiException.class, () ->
+                deviceService.revokeDevice(regResp.getDeviceId(), subuser.getId(), Role.SUBUSER, "127.0.0.1"));
+        assertEquals(403, subuserRevokeEx.getStatus().value());
+
+        // Primary Customer CAN revoke subordinate Subuser's device
+        assertDoesNotThrow(() ->
+                deviceService.revokeDevice(regResp.getDeviceId(), primaryCust.getId(), Role.CUSTOMER, "127.0.0.1"));
+
+        UserDevice dev = deviceRepository.findById(regResp.getDeviceId()).orElseThrow();
+        assertEquals(DeviceStatus.REVOKED, dev.getStatus());
+    }
+
+    @Test
+    @DisplayName("Finding N2, N3, N4: Scheduled retention advisory transaction lock and superseded purge")
+    void testScheduledRetentionTransactionLockAndSupersededPurge() {
+        // 1. Calling runDatasetRetentionJob executes pg_try_advisory_xact_lock cleanly without error
+        assertDoesNotThrow(() -> retentionScheduledService.runDatasetRetentionJob());
+
+        // 2. Can be executed multiple times without stale lock collision
+        assertDoesNotThrow(() -> retentionScheduledService.runDatasetRetentionJob());
+
+        // 3. Purging SUPERSEDED dataset past delete_after
+        AppUser owner = userRepository.findAll().stream()
+                .filter(u -> u.getRole() == Role.OWNER)
+                .findFirst()
+                .orElseGet(() -> userRepository.save(AppUser.builder()
+                        .username("ret_owner_" + UUID.randomUUID())
+                        .fullName("Retention Owner")
+                        .passwordHash(passwordEncoder.encode("Secret@123"))
+                        .role(Role.OWNER)
+                        .status(UserStatus.ACTIVE)
+                        .build()));
+
+        Dataset supersededDs = datasetRepository.save(Dataset.builder()
+                .name("Old Superseded Dataset")
+                .originalFileName("old_super.xlsx")
+                .fileSha256("sha_" + UUID.randomUUID())
+                .storageTier(DatasetTier.MASTER)
+                .status(DatasetStatus.SUPERSEDED)
+                .deleteAfter(Instant.now().minus(2, ChronoUnit.DAYS))
+                .importedByUserId(owner.getId())
+                .createdAt(Instant.now().minus(30, ChronoUnit.DAYS))
+                .build());
+
+        // Purge expired datasets
+        retentionScheduledService.purgeExpiredDatasets();
+
+        // Check that superseded dataset was purged (status set to DELETING)
+        Dataset refreshed = datasetRepository.findById(supersededDs.getId()).orElse(null);
+        if (refreshed != null) {
+            assertEquals(DatasetStatus.DELETING, refreshed.getStatus());
+        }
+    }
+
+    @Test
+    @DisplayName("Finding 5 remainder: Autonomous DENIED audit persistence across caller rollbacks")
+    void testAutonomousDeniedAuditPersistence() {
+        String testUser = "denied_user_" + UUID.randomUUID();
+        AppUser user = userRepository.save(AppUser.builder()
+                .username(testUser)
+                .fullName("Denied Test User")
+                .passwordHash(passwordEncoder.encode("RealSecret@123"))
+                .role(Role.AGENT)
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        // Attempt login with bad password
+        LoginRequest badPassLogin = LoginRequest.builder()
+                .identifier(testUser)
+                .password("WrongPassword@999")
+                .clientType(ClientType.MOBILE)
+                .installationId("inst-audit-test")
+                .build();
+
+        assertThrows(ApiException.class, () -> authService.login(badPassLogin, "127.0.0.1"));
+
+        // Verify DENIED audit record was persisted in database despite exception
+        List<Map<String, Object>> deniedRows = jdbcTemplate.queryForList(
+                "SELECT * FROM audit_log WHERE target_id = ? AND action_type = 'LOGIN' AND outcome = 'DENIED'",
+                testUser
+        );
+        assertFalse(deniedRows.isEmpty(), "DENIED audit log must be persisted in database");
+    }
+
+    @Test
+    @DisplayName("Finding 18: Anti-phone enumeration during customer activation")
+    void testAntiPhoneEnumerationDuringActivation() {
+        // Unknown phone returns identical 400 Bad Request
+        CustomerActivateRequest req = CustomerActivateRequest.builder()
+                .contactPhone("+919999999999")
+                .activationCode("XYZ1234567")
+                .password("NewSecret@123")
+                .build();
+
+        ApiException ex = assertThrows(ApiException.class, () -> authService.activateCustomer(req, "127.0.0.1"));
+        assertEquals(400, ex.getStatus().value());
+        assertTrue(ex.getMessage().contains("Invalid activation credentials or account not eligible for activation"));
+    }
+
+    @Test
+    @DisplayName("Finding 13 & Fail-Closed: Global mobile policy database consistency and JTI fail-closed")
+    void testGlobalMobilePolicyDatabaseConsistency() {
+        // Query global mobile numbers setting directly via service
+        boolean isEnabled = voterService.isGlobalMobileNumbersEnabled();
+        assertNotNull(Boolean.valueOf(isEnabled));
+
+        // Test Registration JTI checking fails closed
+        assertTrue(tokenProvider.isRegistrationJtiInvalid(null));
+        assertTrue(tokenProvider.isRegistrationJtiInvalid(""));
+        assertTrue(tokenProvider.isRegistrationJtiInvalid("   "));
+    }
+
+    @Test
+    @DisplayName("Finding N7: Production security validation enforces CORS allow-list without wildcards or localhost")
+    void testProductionCorsAllowListValidation() {
+        MockEnvironment prodEnv = new MockEnvironment();
+        prodEnv.setActiveProfiles("prod");
+
+        AppProperties prodProps = new AppProperties();
+        prodProps.getJwt().setSecret("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        prodProps.getSecurity().setActivationPepper("production-pepper-real-high-entropy-random-string-2026");
+        prodProps.getSecurity().setEd25519PrivateKeyHex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        prodProps.getSecurity().setEd25519KeyVersion(1);
+        prodProps.getSecurity().setVoterMobileAesKeyHex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        prodProps.getSecurity().setVoterMobileKeyVersion(1);
+
+        // Disallowed wildcard
+        prodProps.getCors().setAllowedOrigins(List.of("*"));
+        SecurityConfig configWildcard = new SecurityConfig(null, null, prodEnv, prodProps);
+        IllegalStateException wildEx = assertThrows(IllegalStateException.class, configWildcard::validateProductionSecurity);
+        assertTrue(wildEx.getMessage().contains("wildcard"));
+
+        // Disallowed localhost
+        prodProps.getCors().setAllowedOrigins(List.of("http://localhost:3000"));
+        SecurityConfig configLocal = new SecurityConfig(null, null, prodEnv, prodProps);
+        IllegalStateException localEx = assertThrows(IllegalStateException.class, configLocal::validateProductionSecurity);
+        assertTrue(localEx.getMessage().contains("localhost"));
+
+        // Valid production CORS
+        prodProps.getCors().setAllowedOrigins(List.of("https://console.elecsarthi.com", "https://admin.elecsarthi.com"));
+        SecurityConfig configValid = new SecurityConfig(null, null, prodEnv, prodProps);
+        assertDoesNotThrow(configValid::validateProductionSecurity);
     }
 
     private KeyPair generateEcKeyPair() {

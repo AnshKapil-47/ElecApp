@@ -14,6 +14,26 @@ public class AppProperties {
     private boolean mobileNumbersEnabled = false;
     private JwtProperties jwt = new JwtProperties();
     private SecurityProperties security = new SecurityProperties();
+    private CorsProperties cors = new CorsProperties();
+
+    @Getter
+    @Setter
+    public static class CorsProperties {
+        private java.util.List<String> allowedOrigins = java.util.List.of(
+                "http://localhost:3000",
+                "http://localhost:5173",
+                "https://console.elecsarthi.com",
+                "https://admin.elecsarthi.com"
+        );
+        private boolean allowCredentials = false;
+        private java.util.List<String> allowedMethods = java.util.List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS");
+        private java.util.List<String> allowedHeaders = java.util.List.of(
+                "Authorization", "Content-Type", "X-Device-Id", "X-Device-Signature",
+                "X-Device-Timestamp", "X-Device-Nonce", "X-Device-Counter",
+                "X-Sync-Session-Id", "X-Offline-Lease-Id"
+        );
+        private long maxAge = 3600L;
+    }
 
     @Getter
     @Setter

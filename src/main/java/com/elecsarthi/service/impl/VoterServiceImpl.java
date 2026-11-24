@@ -447,7 +447,22 @@ public class VoterServiceImpl implements VoterService {
 
     @Override
     public boolean isGlobalMobileNumbersEnabled() {
-        return appProperties.isMobileNumbersEnabled();
+        try {
+            List<String> details = jdbcTemplate.query(
+                    "SELECT details FROM audit_log WHERE action_type = 'GLOBAL_MOBILE_TOGGLE' ORDER BY created_at DESC LIMIT 1",
+                    (rs, rowNum) -> rs.getString("details")
+            );
+            if (!details.isEmpty()) {
+                JsonNode node = objectMapper.readTree(details.get(0));
+                if (node.has("enabled")) {
+                    return node.get("enabled").asBoolean();
+                }
+            }
+            return appProperties.isMobileNumbersEnabled();
+        } catch (Exception e) {
+            log.warn("Database error querying global mobile toggle, failing closed (false): {}", e.getMessage());
+            return false; // Fail closed: unmasking disabled on error
+        }
     }
 
     private Entitlement validateAccessAndGetEntitlement(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId) {
@@ -478,7 +493,7 @@ public class VoterServiceImpl implements VoterService {
         }
 
         boolean canViewUnmasked = voterAccessAuthorizer.isMobileUnmasked(
-                appProperties.isMobileNumbersEnabled(), callerRole, entitlementMobileAccess);
+                isGlobalMobileNumbersEnabled(), callerRole, entitlementMobileAccess);
 
         try {
             byte[] key = HexFormat.of().parseHex(appProperties.getSecurity().getVoterMobileAesKeyHex());

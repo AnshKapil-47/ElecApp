@@ -1,37 +1,24 @@
 package com.elecsarthi.service.impl;
 
-import com.elecsarthi.entity.Dataset;
-import com.elecsarthi.enums.AuditOutcome;
-import com.elecsarthi.enums.DatasetStatus;
-import com.elecsarthi.enums.EntitlementStatus;
-import com.elecsarthi.enums.SessionStatus;
-import com.elecsarthi.enums.SyncStatus;
-import com.elecsarthi.repository.DatasetRepository;
-import com.elecsarthi.repository.EntitlementRepository;
-import com.elecsarthi.repository.SyncSessionRepository;
-import com.elecsarthi.repository.UserSessionRepository;
-import com.elecsarthi.service.AuditService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class RetentionScheduledService {
 
-    private final DatasetRepository datasetRepository;
-    private final EntitlementRepository entitlementRepository;
-    private final UserSessionRepository sessionRepository;
-    private final SyncSessionRepository syncSessionRepository;
-    private final AuditService auditService;
+    private final DatasetRetentionPurger datasetRetentionPurger;
+    private final PlatformTransactionManager transactionManager;
     private final JdbcTemplate jdbcTemplate;
 
     private static final long LOCK_DATASET_PURGE = 1001L;
@@ -39,12 +26,12 @@ public class RetentionScheduledService {
     private static final long LOCK_NONCE_PURGE = 1003L;
 
     /**
-     * Daily 02:00 IST: Purge MASTER and LONG_TERM datasets whose delete_after
+     * Daily 02:00 IST: Purge MASTER, LONG_TERM, and SUPERSEDED datasets whose delete_after
      * retention has passed.
      */
     @Scheduled(cron = "0 0 2 * * *", zone = "Asia/Kolkata")
     public void runDatasetRetentionJob() {
-        executeWithLock(LOCK_DATASET_PURGE, this::purgeExpiredDatasets);
+        executeWithTransactionLock(LOCK_DATASET_PURGE, this::purgeExpiredDatasets);
     }
 
     /**
@@ -53,7 +40,7 @@ public class RetentionScheduledService {
      */
     @Scheduled(cron = "0 0 * * * *", zone = "Asia/Kolkata")
     public void runSessionExpiryJob() {
-        executeWithLock(LOCK_SESSION_EXPIRY, this::expireSessionsAndLeases);
+        executeWithTransactionLock(LOCK_SESSION_EXPIRY, this::expireSessionsAndLeases);
     }
 
     /**
@@ -61,79 +48,31 @@ public class RetentionScheduledService {
      */
     @Scheduled(cron = "0 30 2 * * *", zone = "Asia/Kolkata")
     public void runNoncePurgeJob() {
-        executeWithLock(LOCK_NONCE_PURGE, this::purgeExpiredNonces);
+        executeWithTransactionLock(LOCK_NONCE_PURGE, this::purgeExpiredNonces);
     }
 
-    @Transactional
+    /**
+     * Identifies eligible expired datasets (status IMPORTED or SUPERSEDED) and purges each in an isolated transaction.
+     */
     public void purgeExpiredDatasets() {
         Instant now = Instant.now();
         java.sql.Timestamp nowTs = java.sql.Timestamp.from(now);
         List<Long> expiredDatasetIds = jdbcTemplate.query(
-                "SELECT id FROM dataset WHERE status = 'IMPORTED' AND delete_after IS NOT NULL AND delete_after <= ?",
+                "SELECT id FROM dataset WHERE status IN ('IMPORTED', 'SUPERSEDED') AND delete_after IS NOT NULL AND delete_after <= ?",
                 (rs, rowNum) -> rs.getLong("id"),
                 nowTs);
 
         for (Long datasetId : expiredDatasetIds) {
             try {
-                purgeDataset(datasetId, now);
+                datasetRetentionPurger.purgeSingleDataset(datasetId, now);
             } catch (Exception e) {
                 log.error("Failed to purge expired dataset {}", datasetId, e);
             }
         }
     }
 
-    @Transactional
-    public void purgeDataset(Long datasetId, Instant now) {
-        Dataset ds = datasetRepository.findByIdForUpdate(datasetId).orElse(null);
-        if (ds == null || ds.getStatus() != DatasetStatus.IMPORTED) {
-            log.info("Dataset {} is no longer in IMPORTED status or not found. Skipping purge.", datasetId);
-            return;
-        }
-
-        if (ds.getDeleteAfter() == null || ds.getDeleteAfter().isAfter(now)) {
-            log.info("Dataset {} delete_after is null or in future. Skipping purge.", datasetId);
-            return;
-        }
-
-        log.info("Evaluating expired dataset ID={} name='{}' tier={}", ds.getId(), ds.getName(), ds.getStorageTier());
-
-        // Safety Check 1: Refuse to purge if active entitlements exist
-        boolean hasActiveEntitlements = entitlementRepository.findByDatasetId(ds.getId()).stream()
-                .anyMatch(e -> e.getStatus() == EntitlementStatus.ACTIVE && e.getValidUntil().isAfter(now));
-        if (hasActiveEntitlements) {
-            log.warn("Cannot purge dataset {}: Active entitlements exist. Skipping purge.", ds.getId());
-            return;
-        }
-
-        // Safety Check 2: Refuse to purge if unexpired offline leases exist
-        java.sql.Timestamp nowTs = java.sql.Timestamp.from(now);
-        String leaseSql = "SELECT count(*) FROM offline_lease l " +
-                "JOIN booth_assignment b ON l.booth_assignment_id = b.id " +
-                "JOIN entitlement e ON b.entitlement_id = e.id " +
-                "WHERE e.dataset_id = ? AND l.expires_at > ? AND l.revoked_at IS NULL";
-        Long activeLeaseCount = jdbcTemplate.queryForObject(leaseSql, Long.class, ds.getId(), nowTs);
-        if (activeLeaseCount != null && activeLeaseCount > 0) {
-            log.warn("Cannot purge dataset {}: {} unexpired offline leases exist. Skipping purge.", ds.getId(),
-                    activeLeaseCount);
-            return;
-        }
-
-        // Audit purge before dropping
-        auditService.logDetails(null, null, ds.getId(), null,
-                "DATASET_AUTO_PURGED", AuditOutcome.SUCCESS,
-                "dataset", ds.getId().toString(),
-                Map.of("name", ds.getName(), "tier", ds.getStorageTier().name(), "deleteAfter",
-                        ds.getDeleteAfter().toString()),
-                null);
-
-        // Mark status in metadata to DELETING
-        ds.setStatus(DatasetStatus.DELETING);
-        datasetRepository.saveAndFlush(ds);
-
-        // Drop database partitions
-        jdbcTemplate.execute("SELECT detach_and_drop_dataset_partitions(" + ds.getId() + "::bigint);");
-
-        log.info("Successfully dropped partitions and marked DELETING for dataset {}", ds.getId());
+    public boolean purgeDataset(Long datasetId, Instant now) {
+        return datasetRetentionPurger.purgeSingleDataset(datasetId, now);
     }
 
     public void expireSessionsAndLeases() {
@@ -143,8 +82,7 @@ public class RetentionScheduledService {
         // 1. Terminate expired user sessions
         int expiredSessions = jdbcTemplate.update(
                 "UPDATE user_session SET status = 'TERMINATED', terminated_at = ?, " +
-                        "termination_reason = CASE WHEN absolute_expires_at <= ? THEN 'ABSOLUTE_EXPIRED' ELSE 'IDLE_EXPIRED' END "
-                        +
+                        "termination_reason = CASE WHEN absolute_expires_at <= ? THEN 'ABSOLUTE_EXPIRED' ELSE 'IDLE_EXPIRED' END " +
                         "WHERE status = 'ACTIVE' AND (absolute_expires_at <= ? OR (idle_expires_at IS NOT NULL AND idle_expires_at <= ?))",
                 nowTs, nowTs, nowTs, nowTs);
         if (expiredSessions > 0) {
@@ -169,16 +107,22 @@ public class RetentionScheduledService {
         }
     }
 
-    private void executeWithLock(long lockKey, Runnable task) {
-        Boolean acquired = jdbcTemplate.queryForObject("SELECT pg_try_advisory_lock(?)", Boolean.class, lockKey);
-        if (Boolean.TRUE.equals(acquired)) {
-            try {
+    /**
+     * Executes the task using a PostgreSQL transaction-scoped advisory lock (pg_try_advisory_xact_lock).
+     * The lock is acquired on the transaction's connection and automatically released upon commit/rollback,
+     * completely eliminating connection pool leaks and cross-thread lock state mismatches.
+     */
+    public void executeWithTransactionLock(long lockKey, Runnable task) {
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+        txTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        txTemplate.executeWithoutResult(status -> {
+            Boolean acquired = jdbcTemplate.queryForObject("SELECT pg_try_advisory_xact_lock(?)", Boolean.class, lockKey);
+            if (Boolean.TRUE.equals(acquired)) {
+                log.debug("Acquired advisory xact lock {}", lockKey);
                 task.run();
-            } finally {
-                jdbcTemplate.queryForObject("SELECT pg_advisory_unlock(?)", Boolean.class, lockKey);
+            } else {
+                log.debug("Advisory xact lock {} held by another node, skipping scheduled run", lockKey);
             }
-        } else {
-            log.debug("Advisory lock {} held by another node, skipping scheduled run", lockKey);
-        }
+        });
     }
 }

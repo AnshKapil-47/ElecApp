@@ -5,6 +5,7 @@ import com.elecsarthi.dto.request.DeviceRegisterRequest;
 import com.elecsarthi.dto.request.DeviceVerifyRequest;
 import com.elecsarthi.dto.response.DeviceRegisterResponse;
 import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.DeviceNonce;
 import com.elecsarthi.entity.UserDevice;
 import com.elecsarthi.enums.AuditOutcome;
@@ -16,6 +17,7 @@ import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.DeviceNonceRepository;
 import com.elecsarthi.repository.UserDeviceRepository;
 import com.elecsarthi.repository.UserSessionRepository;
@@ -42,6 +44,7 @@ public class DeviceServiceImpl implements DeviceService {
 
     private final UserDeviceRepository deviceRepository;
     private final AppUserRepository userRepository;
+    private final CustomerAccountRepository customerAccountRepository;
     private final UserSessionRepository sessionRepository;
     private final DeviceNonceRepository nonceRepository;
     private final DeviceSignatureVerifier deviceSignatureVerifier;
@@ -54,6 +57,7 @@ public class DeviceServiceImpl implements DeviceService {
 
     public DeviceServiceImpl(UserDeviceRepository deviceRepository,
                              AppUserRepository userRepository,
+                             CustomerAccountRepository customerAccountRepository,
                              UserSessionRepository sessionRepository,
                              DeviceNonceRepository nonceRepository,
                              DeviceSignatureVerifier deviceSignatureVerifier,
@@ -64,6 +68,7 @@ public class DeviceServiceImpl implements DeviceService {
                              Clock clock) {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
+        this.customerAccountRepository = customerAccountRepository;
         this.sessionRepository = sessionRepository;
         this.nonceRepository = nonceRepository;
         this.deviceSignatureVerifier = deviceSignatureVerifier;
@@ -82,6 +87,14 @@ public class DeviceServiceImpl implements DeviceService {
 
         if (user.getRole() == Role.OWNER || user.getRole() == Role.SUBOWNER) {
             throw new ApiException(ErrorCode.FORBIDDEN, "Owner and Subowner users use the web application only.", HttpStatus.FORBIDDEN);
+        }
+
+        // Finding N1: Prevent password-only device replacement. If an active device exists, reject registration.
+        Optional<UserDevice> activeOpt = deviceRepository.findByUserIdAndStatus(userId, DeviceStatus.ACTIVE);
+        if (activeOpt.isPresent()) {
+            throw new ApiException(ErrorCode.DEVICE_CHANGE_NOT_ALLOWED,
+                    "An active device is already registered for this user. The active device must be revoked by an administrator before a new device can be registered.",
+                    HttpStatus.FORBIDDEN);
         }
 
         // Check if installation ID was ever revoked for this customer
@@ -151,6 +164,14 @@ public class DeviceServiceImpl implements DeviceService {
             }
         }
 
+        // Finding N1: Reject activation if an active device already exists for this user
+        Optional<UserDevice> currentActive = deviceRepository.findByUserIdAndStatus(userId, DeviceStatus.ACTIVE);
+        if (currentActive.isPresent()) {
+            throw new ApiException(ErrorCode.DEVICE_CHANGE_NOT_ALLOWED,
+                    "An active device is already registered for this user. The active device must be revoked before activating a new device.",
+                    HttpStatus.FORBIDDEN);
+        }
+
         UserDevice pendingDevice = deviceRepository.findById(request.getDeviceId())
                 .orElseThrow(() -> new ResourceNotFoundException("Device not found"));
 
@@ -165,8 +186,6 @@ public class DeviceServiceImpl implements DeviceService {
         }
 
         // Verify ECDSA signature
-        // Challenge data is the raw challenge bytes hashed, or raw bytes matching the stored hash
-        // The signature is verified against the public key
         boolean signatureValid = deviceSignatureVerifier.verifySignature(
                 pendingDevice.getPublicKey(),
                 pendingDevice.getChallengeHash().getBytes(StandardCharsets.UTF_8),
@@ -178,18 +197,6 @@ public class DeviceServiceImpl implements DeviceService {
                     "DEVICE_VERIFICATION", AuditOutcome.DENIED, "user_device", pendingDevice.getId().toString(),
                     "{\"reason\":\"Invalid signature\"}", clientIp);
             throw new ApiException(ErrorCode.INVALID_DEVICE_SIGNATURE, "Device challenge signature verification failed", HttpStatus.BAD_REQUEST);
-        }
-
-        // If user already had an active device, mark it as REPLACED
-        Optional<UserDevice> currentActive = deviceRepository.findByUserIdAndStatus(userId, DeviceStatus.ACTIVE);
-        if (currentActive.isPresent()) {
-            UserDevice oldDevice = currentActive.get();
-            oldDevice.setStatus(DeviceStatus.REPLACED);
-            oldDevice.setReplacedByDeviceId(pendingDevice.getId());
-            deviceRepository.save(oldDevice);
-
-            // Terminate sessions of replaced device
-            sessionRepository.terminateAllActiveByDeviceId(oldDevice.getId(), SessionStatus.TERMINATED, now, "DEVICE_REPLACED", userId);
         }
 
         pendingDevice.setStatus(DeviceStatus.ACTIVE);
@@ -211,24 +218,61 @@ public class DeviceServiceImpl implements DeviceService {
 
     @Override
     @Transactional
-    public void revokeDevice(UUID deviceId, Long revokedByUserId, String clientIp) {
+    public void revokeDevice(UUID deviceId, Long callerUserId, Role callerRole, String clientIp) {
         UserDevice device = deviceRepository.findById(deviceId)
                 .orElseThrow(() -> new ResourceNotFoundException("Device not found"));
+
+        // Finding N1: Role-based revocation authorization
+        if (callerRole == Role.OWNER || callerRole == Role.SUBOWNER) {
+            // Owner and Subowner have authority to revoke any device
+        } else if (callerRole == Role.AGENT) {
+            // Agent can only revoke devices belonging to customers assigned to this agent (or their subusers)
+            if (device.getCustomerAccountId() == null) {
+                throw new ApiException(ErrorCode.FORBIDDEN, "Agents can only revoke devices for their assigned customers.", HttpStatus.FORBIDDEN);
+            }
+            CustomerAccount customer = customerAccountRepository.findById(device.getCustomerAccountId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+            if (!callerUserId.equals(customer.getOwningAgentUserId())) {
+                throw new ApiException(ErrorCode.FORBIDDEN, "Agents can only revoke devices for their assigned customers.", HttpStatus.FORBIDDEN);
+            }
+        } else if (callerRole == Role.CUSTOMER) {
+            // Customer can only revoke subordinate SUBUSER devices within their own customer account
+            AppUser callerUser = userRepository.findById(callerUserId)
+                    .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+            if (device.getCustomerAccountId() == null || !device.getCustomerAccountId().equals(callerUser.getCustomerAccountId())) {
+                throw new ApiException(ErrorCode.FORBIDDEN, "Customers can only revoke devices belonging to their own organization.", HttpStatus.FORBIDDEN);
+            }
+            AppUser deviceUser = userRepository.findById(device.getUserId())
+                    .orElseThrow(() -> new ResourceNotFoundException("Device user not found"));
+            if (deviceUser.getRole() != Role.SUBUSER) {
+                throw new ApiException(ErrorCode.FORBIDDEN, "Customers can only revoke devices belonging to subordinate subusers.", HttpStatus.FORBIDDEN);
+            }
+        } else {
+            // SUBUSER cannot revoke any device
+            throw new ApiException(ErrorCode.FORBIDDEN, "Subusers cannot revoke devices.", HttpStatus.FORBIDDEN);
+        }
 
         Instant now = clock.instant();
         device.setStatus(DeviceStatus.REVOKED);
         device.setRevokedAt(now);
-        device.setRevokedByUserId(revokedByUserId);
+        device.setRevokedByUserId(callerUserId);
         deviceRepository.save(device);
 
-        sessionRepository.terminateAllActiveByDeviceId(deviceId, SessionStatus.TERMINATED, now, "DEVICE_REVOKED", revokedByUserId);
+        sessionRepository.terminateAllActiveByDeviceId(deviceId, SessionStatus.TERMINATED, now, "DEVICE_REVOKED", callerUserId);
 
         // Cascade-revoke any active offline leases associated with this device
         jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? WHERE device_id = ? AND revoked_at IS NULL",
-                java.sql.Timestamp.from(now), revokedByUserId, deviceId);
+                java.sql.Timestamp.from(now), callerUserId, deviceId);
 
-        auditService.log(revokedByUserId, device.getCustomerAccountId(), null, device.getId(),
-                "DEVICE_REVOKE", AuditOutcome.SUCCESS, "user_device", device.getId().toString(), null, clientIp);
+        auditService.log(callerUserId, device.getCustomerAccountId(), null, device.getId(),
+                "DEVICE_REVOKE", AuditOutcome.SUCCESS, "user_device", device.getId().toString(),
+                "{\"revokedByRole\":\"" + callerRole.name() + "\"}", clientIp);
+    }
+
+    @Override
+    @Transactional
+    public void revokeDevice(UUID deviceId, Long revokedByUserId, String clientIp) {
+        revokeDevice(deviceId, revokedByUserId, Role.OWNER, clientIp);
     }
 
     @Override

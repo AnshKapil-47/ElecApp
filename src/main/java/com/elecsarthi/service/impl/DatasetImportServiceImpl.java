@@ -178,19 +178,25 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             // Create partitions
             jdbcTemplate.execute("SELECT create_dataset_partitions(" + datasetId + ");");
 
-            // Finding 4: Compute text filter/guard columns requiring CriteriaNormalizer.normalizeText
+            // Finding N6: Cross-lens text normalization.
+            // A dataset can be queried under multiple election types (lenses).
+            // Pre-normalize the union of all text filter and guard columns across all election types.
             Set<String> textFilterColumns = new HashSet<>();
             textFilterColumns.add("state");
             textFilterColumns.add("district");
             textFilterColumns.add("voter_id");
-            if (electionType.getGuardColumn() != null) {
-                textFilterColumns.add(electionType.getGuardColumn().toLowerCase());
+            for (ElectionType et : electionTypeRepository.findAll()) {
+                if (et.getGuardColumn() != null && !et.getGuardColumn().isBlank()) {
+                    textFilterColumns.add(et.getGuardColumn().toLowerCase().trim());
+                }
             }
-            List<ElectionTypeField> filterFields = fieldRepository.findByElectionTypeIdAndUsageOrderByFilterOrderAsc(
-                    electionType.getId(), FieldUsage.FILTER);
-            for (ElectionTypeField f : filterFields) {
-                if (!INT_COLUMNS.contains(f.getSourceColumn().toLowerCase())) {
-                    textFilterColumns.add(f.getSourceColumn().toLowerCase());
+            List<ElectionTypeField> allFields = fieldRepository.findAll();
+            for (ElectionTypeField f : allFields) {
+                if (f.getUsage() == FieldUsage.FILTER && f.getSourceColumn() != null) {
+                    String col = f.getSourceColumn().toLowerCase().trim();
+                    if (!INT_COLUMNS.contains(col)) {
+                        textFilterColumns.add(col);
+                    }
                 }
             }
 

@@ -99,6 +99,20 @@ public class SecurityConfig {
             if (appProperties.getSecurity().getVoterMobileKeyVersion() <= 0) {
                 throw new IllegalStateException("FATAL: Voter mobile AES key version must be a positive integer in production!");
             }
+
+            // 5. CORS Allow-List Production Validation
+            if (appProperties.getCors() == null || appProperties.getCors().getAllowedOrigins() == null || appProperties.getCors().getAllowedOrigins().isEmpty()) {
+                throw new IllegalStateException("FATAL: Production CORS allowed origins must be explicitly configured!");
+            }
+            for (String origin : appProperties.getCors().getAllowedOrigins()) {
+                if (origin == null || origin.isBlank() || "*".equals(origin.trim())) {
+                    throw new IllegalStateException("FATAL: Production CORS origins cannot contain wildcards (*)");
+                }
+                String lower = origin.toLowerCase().trim();
+                if (lower.contains("localhost") || lower.contains("127.0.0.1")) {
+                    throw new IllegalStateException("FATAL: Production CORS origins cannot allow localhost in production: " + origin);
+                }
+            }
         }
     }
 
@@ -120,11 +134,11 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOriginPatterns(List.of("*"));
-        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
-        configuration.setAllowedHeaders(List.of("*"));
-        configuration.setAllowCredentials(true);
-        configuration.setMaxAge(3600L);
+        configuration.setAllowedOrigins(appProperties.getCors().getAllowedOrigins());
+        configuration.setAllowedMethods(appProperties.getCors().getAllowedMethods());
+        configuration.setAllowedHeaders(appProperties.getCors().getAllowedHeaders());
+        configuration.setAllowCredentials(appProperties.getCors().isAllowCredentials());
+        configuration.setMaxAge(appProperties.getCors().getMaxAge());
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", configuration);
         return source;

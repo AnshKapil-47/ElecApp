@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -88,7 +89,11 @@ public class DeviceSignatureFilter extends OncePerRequestFilter {
                     log.warn("Device signature verification failed for device {}: {}", deviceId, e.getMessage());
                     response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                     response.setContentType("application/json");
-                    response.getWriter().write("{\"errorCode\":\"INVALID_DEVICE_SIGNATURE\",\"message\":\"" + e.getMessage() + "\"}");
+                    Map<String, String> errMap = Map.of(
+                            "errorCode", "INVALID_DEVICE_SIGNATURE",
+                            "message", e.getMessage() != null ? e.getMessage() : "Invalid device signature"
+                    );
+                    new com.fasterxml.jackson.databind.ObjectMapper().writeValue(response.getWriter(), errMap);
                     return;
                 }
             }
