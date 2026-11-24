@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.time.Clock;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -20,6 +21,7 @@ public class RetentionScheduledService {
     private final DatasetRetentionPurger datasetRetentionPurger;
     private final PlatformTransactionManager transactionManager;
     private final JdbcTemplate jdbcTemplate;
+    private final Clock clock;
 
     private static final long LOCK_DATASET_PURGE = 1001L;
     private static final long LOCK_SESSION_EXPIRY = 1002L;
@@ -55,7 +57,7 @@ public class RetentionScheduledService {
      * Identifies eligible expired datasets (status IMPORTED or SUPERSEDED) and purges each in an isolated transaction.
      */
     public void purgeExpiredDatasets() {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         java.sql.Timestamp nowTs = java.sql.Timestamp.from(now);
         List<Long> expiredDatasetIds = jdbcTemplate.query(
                 "SELECT id FROM dataset WHERE status IN ('IMPORTED', 'SUPERSEDED') AND delete_after IS NOT NULL AND delete_after <= ?",
@@ -76,7 +78,7 @@ public class RetentionScheduledService {
     }
 
     public void expireSessionsAndLeases() {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         java.sql.Timestamp nowTs = java.sql.Timestamp.from(now);
 
         // 1. Terminate expired user sessions
@@ -99,7 +101,7 @@ public class RetentionScheduledService {
     }
 
     public void purgeExpiredNonces() {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         java.sql.Timestamp nowTs = java.sql.Timestamp.from(now);
         int deletedNonces = jdbcTemplate.update("DELETE FROM device_nonce WHERE expires_at <= ?", nowTs);
         if (deletedNonces > 0) {

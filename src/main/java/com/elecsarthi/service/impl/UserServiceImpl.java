@@ -61,8 +61,8 @@ public class UserServiceImpl implements UserService {
 
         subowner = userRepository.save(subowner);
 
-        auditService.log(callerUserId, null, null, null, "USER_CREATE", AuditOutcome.SUCCESS,
-                "app_user", subowner.getId().toString(), "{\"role\":\"SUBOWNER\",\"username\":\"" + subowner.getUsername() + "\"}", null);
+        auditService.logDetails(callerUserId, null, null, null, "USER_CREATE", AuditOutcome.SUCCESS,
+                "app_user", subowner.getId().toString(), AuditService.details("role", "SUBOWNER", "username", subowner.getUsername()), null);
 
         return mapToDetail(subowner, 0);
     }
@@ -89,8 +89,8 @@ public class UserServiceImpl implements UserService {
 
         agent = userRepository.save(agent);
 
-        auditService.log(callerUserId, null, null, null, "USER_CREATE", AuditOutcome.SUCCESS,
-                "app_user", agent.getId().toString(), "{\"role\":\"AGENT\",\"username\":\"" + agent.getUsername() + "\"}", null);
+        auditService.logDetails(callerUserId, null, null, null, "USER_CREATE", AuditOutcome.SUCCESS,
+                "app_user", agent.getId().toString(), AuditService.details("role", "AGENT", "username", agent.getUsername()), null);
 
         return mapToDetail(agent, 0);
     }
@@ -128,8 +128,8 @@ public class UserServiceImpl implements UserService {
             terminateUserSessions(id, "USER_SUSPENDED", callerUserId, callerRole);
         }
 
-        auditService.log(callerUserId, user.getCustomerAccountId(), null, null, "USER_STATUS_CHANGE", AuditOutcome.SUCCESS,
-                "app_user", user.getId().toString(), "{\"status\":\"" + newStatus + "\"}", null);
+        auditService.logDetails(callerUserId, user.getCustomerAccountId(), null, null, "USER_STATUS_CHANGE", AuditOutcome.SUCCESS,
+                "app_user", user.getId().toString(), AuditService.details("status", newStatus), null);
     }
 
     @Override
@@ -167,8 +167,8 @@ public class UserServiceImpl implements UserService {
             sessionRepository.save(s);
         }
 
-        auditService.log(callerUserId, user.getCustomerAccountId(), null, null, "SESSION_TERMINATE", AuditOutcome.SUCCESS,
-                "app_user", user.getId().toString(), "{\"count\":" + activeSessions.size() + ",\"reason\":\"" + reason + "\"}", null);
+        auditService.logDetails(callerUserId, user.getCustomerAccountId(), null, null, "SESSION_TERMINATE", AuditOutcome.SUCCESS,
+                "app_user", user.getId().toString(), AuditService.details("count", activeSessions.size(), "reason", reason), null);
     }
 
     private void validateCanManageUser(Role callerRole, AppUser targetUser) {

@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.util.Locale;
 import com.elecsarthi.dto.response.CascadingFilterOptionResponse;
 import com.elecsarthi.dto.response.ElectionTypeFieldResponse;
 import com.elecsarthi.dto.response.ElectionTypeResponse;
@@ -16,7 +17,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Service
@@ -69,7 +73,7 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
         ElectionType electionType = resolveElectionType(codeOrId);
 
         // Verify targetField is a valid column for this election type
-        ElectionTypeField targetDef = fieldRepository.findByElectionTypeIdAndSourceColumn(electionType.getId(), targetField.trim().toLowerCase())
+        ElectionTypeField targetDef = fieldRepository.findByElectionTypeIdAndSourceColumn(electionType.getId(), targetField.trim().toLowerCase(Locale.ROOT))
                 .orElseThrow(() -> new BadRequestException("Invalid target field: " + targetField));
 
         String safeTargetColumn = targetDef.getSourceColumn();
@@ -82,7 +86,7 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
 
         if (parentFilters != null && !parentFilters.isEmpty()) {
             for (Map.Entry<String, String> entry : parentFilters.entrySet()) {
-                String parentCol = entry.getKey().trim().toLowerCase();
+                String parentCol = entry.getKey().trim().toLowerCase(Locale.ROOT);
                 String parentVal = entry.getValue();
 
                 if (parentVal == null || parentVal.isBlank()) continue;
@@ -127,7 +131,7 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
         } catch (NumberFormatException ignored) {
             // Treat as code
             try {
-                ElectionTypeCode code = ElectionTypeCode.valueOf(codeOrId.trim().toUpperCase());
+                ElectionTypeCode code = ElectionTypeCode.valueOf(codeOrId.trim().toUpperCase(Locale.ROOT));
                 return electionTypeRepository.findByCode(code)
                         .orElseThrow(() -> new ResourceNotFoundException("Election type not found with code: " + code));
             } catch (IllegalArgumentException e) {

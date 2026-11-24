@@ -1,8 +1,14 @@
 package com.elecsarthi.security;
 
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.UserDevice;
+import com.elecsarthi.entity.UserSession;
+import com.elecsarthi.enums.ClientType;
+import com.elecsarthi.enums.DevicePlatform;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.SessionStatus;
+import com.elecsarthi.repository.UserDeviceRepository;
+import com.elecsarthi.repository.UserSessionRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.security.jwt.JwtTokenProvider;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,8 +26,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.UUID;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 

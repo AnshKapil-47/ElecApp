@@ -248,7 +248,7 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
 
 ### 8.1 Voter Search
 - **Endpoint:** `POST /api/v1/voters/search`
-- **Access:** CUSTOMER and SUBUSER only. (Owner, Subowner, Agent: 403 Forbidden).
+- **Access:** CUSTOMER and SUBUSER only. (Owner, Subowner, Agent: 403 Forbidden). An entitlement id belonging to another Customer: 404.
 - **Rules Enforced:**
   - Subusers automatically restricted to active assigned booths.
   - Server-side pagination capped at 100.
@@ -285,8 +285,25 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
 - `POST /api/v1/leases/booth`: Subuser mobile client requests signed lease.
   - Signed with Ed25519 private key.
   - Expiry = `min(boothAssignment.validUntil, entitlement.validUntil, now + 24 hours)`.
+  - The response and the signed `payloadJson` never contain a dataset id, name or any import detail. The payload identifies the lease (`leaseId`) and the entitlement (`entitlementId`); the server resolves the dataset from its own lease record (lease → booth assignment → entitlement).
 - `POST /api/v1/leases/writeback`: Subuser submits offline turnout marks.
   - Marks prior to lease expiry accepted into `voter_turnout` (`source = 'OFFLINE_LEASE'`). Marks after expiry rejected.
+  - Keyed on `leaseId` only. The server revalidates the lease, assignment, entitlement, device, Customer and Subuser and takes the dataset from its own records, never from the client.
+
+**Signed lease payload, version 2** (canonical JSON, keys sorted; the Ed25519 signature is over the SHA-256 of this exact text):
+
+```json
+{"boothAssignmentId":..,"boothValue":..,"customerAccountId":..,"deviceId":"..","entitlementId":..,
+ "expiresAt":"..","issuedAt":"..","leaseId":"<uuid>","leaseSeq":..,"payloadVersion":2,"subuserId":..}
+```
+
+> **Mobile-client compatibility (breaking change to the lease contract).**
+> Version 1 payloads contained `"datasetId"`; version 2 removes it, adds `"leaseId"` and `"payloadVersion": 2`, and `OfflineLeaseResponse.datasetId` is gone.
+> - The client must verify the signature over `payloadJson` as an opaque string (do not re-serialize it) and must not read or require `datasetId` from the lease or the response. Address voters by `(entitlementId, voterRef)`; for write-back send the `leaseId`.
+> - Rollout: deploy backend and app together. The server accepts and verifies only the current format and has no dual-format mode. Leases live at most 24 hours, so version 1 leases already on devices simply expire within a day, and their write-back keeps working until then because it depends only on `leaseId`. After 24 hours no version 1 lease remains.
+
+### 9.4 Not found vs. forbidden
+A resource that is outside the caller's visible scope (another tenant's sale, Customer, entitlement, Subuser, booth assignment, lease, device or sync session) is answered exactly like a missing one: `404` with the same message, so ids reveal nothing. `403` is reserved for operations the caller's role may never perform (for example a Subowner viewing sales, a Subuser viewing entitlements, an Agent reading voters) and for the caller's own resources in a state that forbids the action (for example an expired or revoked entitlement).
 
 ### 9.3 Bulk Sync
 - `POST /api/v1/sync/sessions`: Customer only (Subusers forbidden).

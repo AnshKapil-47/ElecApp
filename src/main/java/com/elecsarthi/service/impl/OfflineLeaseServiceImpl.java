@@ -1,19 +1,37 @@
 package com.elecsarthi.service.impl;
 
+import java.time.Clock;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.OfflineTurnoutMarkDto;
 import com.elecsarthi.dto.request.OfflineWritebackRequest;
 import com.elecsarthi.dto.request.RequestOfflineLeaseRequest;
 import com.elecsarthi.dto.response.OfflineLeaseResponse;
 import com.elecsarthi.dto.response.OfflineWritebackResponse;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.BoothAssignment;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.Entitlement;
+import com.elecsarthi.entity.OfflineLease;
+import com.elecsarthi.entity.UserDevice;
+import com.elecsarthi.enums.AuditOutcome;
+import com.elecsarthi.enums.BoothAssignmentStatus;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.BoothAssignmentRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
+import com.elecsarthi.repository.ElectionTypeRepository;
+import com.elecsarthi.repository.EntitlementRepository;
+import com.elecsarthi.repository.OfflineLeaseRepository;
+import com.elecsarthi.repository.UserDeviceRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.security.signing.OfflineLeaseSigner;
 import com.elecsarthi.service.AuditService;
@@ -29,12 +47,22 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.Map;
+import java.util.Optional;
+import java.util.TreeMap;
+import java.util.UUID;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OfflineLeaseServiceImpl implements OfflineLeaseService {
+
+    /**
+     * Version of the signed lease payload. Version 2 replaced the dataset id by the lease id. Leases live at most
+     * 24 hours, so version 1 leases issued before the switch expire on their own and nothing on the server
+     * accepts or verifies an old format: writeback is keyed on the lease id and resolves everything from the database.
+     */
+    static final int LEASE_PAYLOAD_VERSION = 2;
 
     private final OfflineLeaseRepository offlineLeaseRepository;
     private final BoothAssignmentRepository boothAssignmentRepository;
@@ -48,6 +76,7 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final Clock clock;
 
     @Override
     @Transactional
@@ -64,14 +93,14 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
                 .orElseThrow(() -> new ResourceNotFoundException("Booth assignment not found"));
 
         if (!assignment.getSubuserId().equals(subuserId)) {
-            throw new ForbiddenException("Booth assignment does not belong to this subuser");
+            throw new ResourceNotFoundException("Booth assignment not found");
         }
 
         if (assignment.getStatus() != BoothAssignmentStatus.ACTIVE) {
             throw new BadRequestException("Booth assignment is not active");
         }
 
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         if (now.isBefore(assignment.getValidFrom()) || !now.isBefore(assignment.getValidUntil())) {
             throw new ApiException(ErrorCode.SUBUSER_BOOTH_EXPIRED, "Booth assignment is expired or not yet active", HttpStatus.BAD_REQUEST);
         }
@@ -96,14 +125,17 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
             expiresAt = ent.getValidUntil();
         }
 
-        // Canonical payload
+        // Canonical payload. It names the lease, never the dataset: the dataset is resolved on the server from
+        // the lease record (lease -> booth assignment -> entitlement), and a signature gives no confidentiality.
+        UUID leaseId = UUID.randomUUID();
         Map<String, Object> payloadMap = new TreeMap<>();
+        payloadMap.put("payloadVersion", LEASE_PAYLOAD_VERSION);
+        payloadMap.put("leaseId", leaseId.toString());
         payloadMap.put("subuserId", subuserId);
         payloadMap.put("customerAccountId", assignment.getCustomerAccountId());
         payloadMap.put("boothAssignmentId", assignment.getId());
         payloadMap.put("boothValue", assignment.getBoothValue());
         payloadMap.put("entitlementId", ent.getId());
-        payloadMap.put("datasetId", ent.getDatasetId());
         payloadMap.put("deviceId", deviceId.toString());
         payloadMap.put("leaseSeq", nextSeq);
         payloadMap.put("issuedAt", now.toString());
@@ -122,6 +154,7 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
         String serverSignature = offlineLeaseSigner.signLeasePayload(payloadSha256);
 
         OfflineLease lease = OfflineLease.builder()
+                .id(leaseId)
                 .boothAssignmentId(assignment.getId())
                 .subuserId(subuserId)
                 .deviceId(deviceId)
@@ -134,9 +167,9 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
 
         lease = offlineLeaseRepository.save(lease);
 
-        auditService.log(subuserId, assignment.getCustomerAccountId(), ent.getDatasetId(), deviceId,
+        auditService.logDetails(subuserId, assignment.getCustomerAccountId(), ent.getDatasetId(), deviceId,
                 "OFFLINE_LEASE_ISSUED", AuditOutcome.SUCCESS, "offline_lease", lease.getId().toString(),
-                "{\"booth\":" + assignment.getBoothValue() + ",\"seq\":" + nextSeq + "}", null);
+                AuditService.details("booth", assignment.getBoothValue(), "seq", nextSeq), null);
 
         return OfflineLeaseResponse.builder()
                 .leaseId(lease.getId())
@@ -146,7 +179,6 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
                 .leaseSeq(nextSeq)
                 .boothValue(assignment.getBoothValue())
                 .entitlementId(ent.getId())
-                .datasetId(ent.getDatasetId())
                 .issuedAt(now)
                 .expiresAt(expiresAt)
                 .payloadJson(payloadJson)
@@ -166,14 +198,14 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
                 .orElseThrow(() -> new ResourceNotFoundException("Offline lease not found"));
 
         if (!lease.getSubuserId().equals(subuserId)) {
-            throw new ForbiddenException("Lease does not belong to this subuser");
+            throw new ResourceNotFoundException("Offline lease not found");
         }
 
         if (lease.getRevokedAt() != null) {
             throw new ForbiddenException("Offline lease has been revoked");
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
 
         BoothAssignment assignment = boothAssignmentRepository.findById(lease.getBoothAssignmentId())
                 .orElseThrow(() -> new ResourceNotFoundException("Booth assignment not found"));
@@ -247,9 +279,9 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
             }
         }
 
-        auditService.log(subuserId, assignment.getCustomerAccountId(), ent.getDatasetId(), deviceId,
+        auditService.logDetails(subuserId, assignment.getCustomerAccountId(), ent.getDatasetId(), deviceId,
                 "OFFLINE_WRITEBACK_PROCESSED", AuditOutcome.SUCCESS, "offline_lease", lease.getId().toString(),
-                "{\"accepted\":" + totalAccepted + ",\"rejected\":" + totalRejected + "}", null);
+                AuditService.details("accepted", totalAccepted, "rejected", totalRejected), null);
 
         return OfflineWritebackResponse.builder()
                 .totalSubmitted(totalSubmitted)

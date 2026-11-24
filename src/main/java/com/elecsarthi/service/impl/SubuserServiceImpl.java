@@ -1,5 +1,7 @@
 package com.elecsarthi.service.impl;
 
+import java.util.Locale;
+import java.time.Clock;
 import com.elecsarthi.dto.request.CreateBoothAssignmentRequest;
 import com.elecsarthi.dto.request.CreateSubuserRequest;
 import com.elecsarthi.dto.request.RevokeBoothAssignmentRequest;
@@ -9,7 +11,11 @@ import com.elecsarthi.entity.AppUser;
 import com.elecsarthi.entity.BoothAssignment;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.Entitlement;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.enums.AuditOutcome;
+import com.elecsarthi.enums.BoothAssignmentStatus;
+import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
@@ -34,7 +40,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -50,6 +59,7 @@ public class SubuserServiceImpl implements SubuserService {
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final Clock clock;
 
     @Override
     @Transactional
@@ -62,7 +72,7 @@ public class SubuserServiceImpl implements SubuserService {
             throw new ConflictException("Username is already taken");
         }
 
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
 
         AppUser subuser = AppUser.builder()
                 .username(request.getUsername().trim())
@@ -77,9 +87,9 @@ public class SubuserServiceImpl implements SubuserService {
 
         subuser = userRepository.save(subuser);
 
-        auditService.log(customerUserId, customerAccountId, null, null,
+        auditService.logDetails(customerUserId, customerAccountId, null, null,
                 "SUBUSER_CREATED", AuditOutcome.SUCCESS, "app_user", subuser.getId().toString(),
-                "{\"username\":\"" + subuser.getUsername() + "\"}", null);
+                AuditService.details("username", subuser.getUsername()), null);
 
         return SubuserDetailResponse.builder()
                 .id(subuser.getId())
@@ -104,7 +114,7 @@ public class SubuserServiceImpl implements SubuserService {
                 .orElseThrow(() -> new ResourceNotFoundException("Subuser not found"));
 
         if (subuser.getRole() != Role.SUBUSER || !customerAccountId.equals(subuser.getCustomerAccountId())) {
-            throw new ForbiddenException("Invalid subuser for this customer account");
+            throw new ResourceNotFoundException("Subuser not found");
         }
 
         if (subuser.getStatus() != UserStatus.ACTIVE) {
@@ -113,11 +123,14 @@ public class SubuserServiceImpl implements SubuserService {
 
         Entitlement ent = entitlementRepository.requireById(request.getEntitlementId());
 
-        if (!customerAccountId.equals(ent.getCustomerAccountId()) || ent.getStatus() != EntitlementStatus.ACTIVE) {
-            throw new ForbiddenException("Entitlement is not active or belongs to another customer");
+        if (!customerAccountId.equals(ent.getCustomerAccountId())) {
+            throw new ResourceNotFoundException("Entitlement not found");
+        }
+        if (ent.getStatus() != EntitlementStatus.ACTIVE) {
+            throw new ForbiddenException("Entitlement is not active");
         }
 
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
             throw new BadRequestException("Entitlement is expired or not yet active");
         }
@@ -179,9 +192,9 @@ public class SubuserServiceImpl implements SubuserService {
 
         assignment = boothAssignmentRepository.save(assignment);
 
-        auditService.log(customerUserId, customerAccountId, ent.getDatasetId(), null,
+        auditService.logDetails(customerUserId, customerAccountId, ent.getDatasetId(), null,
                 "BOOTH_ASSIGNED", AuditOutcome.SUCCESS, "booth_assignment", assignment.getId().toString(),
-                "{\"subuserId\":" + subuserId + ",\"booth\":" + request.getBoothValue() + ",\"slot\":" + request.getSlot() + "}", null);
+                AuditService.details("subuserId", subuserId, "booth", request.getBoothValue(), "slot", request.getSlot()), null);
 
         return mapToResponse(assignment);
     }
@@ -189,22 +202,22 @@ public class SubuserServiceImpl implements SubuserService {
     @Override
     @Transactional
     public BoothAssignmentResponse revokeBoothAssignment(Long callerUserId, Role callerRole, Long customerAccountId, Long assignmentId, RevokeBoothAssignmentRequest request) {
-        BoothAssignment assignment = boothAssignmentRepository.findById(assignmentId)
-                .orElseThrow(() -> new ResourceNotFoundException("Booth assignment not found"));
-
         if (callerRole != Role.OWNER && callerRole != Role.CUSTOMER) {
             throw new ForbiddenException("Only Customer or Owner support can revoke booth assignments");
         }
 
+        BoothAssignment assignment = boothAssignmentRepository.findById(assignmentId)
+                .orElseThrow(() -> new ResourceNotFoundException("Booth assignment not found"));
+
         if (callerRole == Role.CUSTOMER && !assignment.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ForbiddenException("Cannot revoke booth assignment for another customer account");
+            throw new ResourceNotFoundException("Booth assignment not found");
         }
 
         if (assignment.getStatus() == BoothAssignmentStatus.REVOKED) {
             throw new BadRequestException("Booth assignment is already revoked");
         }
 
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         assignment.setStatus(BoothAssignmentStatus.REVOKED);
         assignment.setRevokedAt(now);
         assignment.setRevokeReason(request.getRevokeReason());
@@ -215,9 +228,9 @@ public class SubuserServiceImpl implements SubuserService {
         jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? WHERE booth_assignment_id = ? AND revoked_at IS NULL",
                 java.sql.Timestamp.from(now), callerUserId, assignment.getId());
 
-        auditService.log(callerUserId, assignment.getCustomerAccountId(), null, null,
+        auditService.logDetails(callerUserId, assignment.getCustomerAccountId(), null, null,
                 "BOOTH_ASSIGNMENT_REVOKED", AuditOutcome.SUCCESS, "booth_assignment", assignment.getId().toString(),
-                "{\"reason\":\"" + request.getRevokeReason() + "\"}", null);
+                AuditService.details("reason", request.getRevokeReason()), null);
 
         return mapToResponse(assignment);
     }
@@ -229,7 +242,7 @@ public class SubuserServiceImpl implements SubuserService {
             throw new ForbiddenException("Access denied to subuser list");
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         List<AppUser> subusers = userRepository.findByCustomerAccountId(customerAccountId).stream()
                 .filter(u -> u.getRole() == Role.SUBUSER)
                 .collect(Collectors.toList());
@@ -261,10 +274,10 @@ public class SubuserServiceImpl implements SubuserService {
                 .orElseThrow(() -> new ResourceNotFoundException("Subuser not found"));
 
         if (!customerAccountId.equals(subuser.getCustomerAccountId())) {
-            throw new ForbiddenException("Access denied to subuser");
+            throw new ResourceNotFoundException("Subuser not found");
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         List<BoothAssignmentResponse> assignments = boothAssignmentRepository
                 .findBySubuserIdAndStatus(subuser.getId(), BoothAssignmentStatus.ACTIVE).stream()
                 .filter(ba -> ba.getValidUntil().isAfter(now))
@@ -303,7 +316,7 @@ public class SubuserServiceImpl implements SubuserService {
         try {
             Map<String, Object> criteria = objectMapper.readValue(criteriaJson, new TypeReference<Map<String, Object>>() {});
             for (Map.Entry<String, Object> entry : criteria.entrySet()) {
-                String col = entry.getKey().trim().toLowerCase();
+                String col = entry.getKey().trim().toLowerCase(Locale.ROOT);
                 whereClause.append(" AND v.").append(col).append(" = ? ");
                 params.add(entry.getValue());
             }

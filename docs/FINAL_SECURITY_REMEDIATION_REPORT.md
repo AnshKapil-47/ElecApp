@@ -14,7 +14,7 @@
 Following the forensic code review in `ElecApp_code_review.md` (identifying 3 Critical, 8 High, 7 Medium, and 3 Low priority findings against commit `1a5951e`), all 21 security vulnerabilities, data integrity risks, and architectural gaps have been remediated in the codebase and verified with automated integration tests.
 
 The backend now passes:
-- **10/10 Integration Test Suites** (57/57 integration tests passing, 0 failures, 0 errors, 0 skipped).
+- **10/10 Integration Test Suites** (66/66 integration tests passing, 0 failures, 0 errors, 0 skipped).
 - **83/83 PostgreSQL Database Schema Constraints & Security Checks** (`tools/db/test_schema.sql` passing 100%).
 - **Zero Schema Alterations:** The frozen 18-table relational schema remains intact; no monetary columns or unauthorized tables were added.
 - **Strict Canonical Role Model:** 5 canonical roles enforced at the database check constraint, JWT, filter, and service layers.
@@ -201,7 +201,7 @@ The backend now passes:
 ### Finding 13: Persistent Global Mobile Number Toggle (Medium)
 - **Defect:** The global voter mobile display toggle was an in-memory boolean that reset to default on application restart, and did not invalidate customer offline caches when toggled.
 - **Remediation:**
-  - Persisted mobile toggle state changes to `audit_log` with `action_type = 'GLOBAL_MOBILE_ACCESS_TOGGLE'`.
+  - Persisted mobile toggle state changes to `audit_log` with `action_type = 'GLOBAL_MOBILE_TOGGLE'`.
   - When the Owner toggles mobile access, the service automatically increments `mobile_access_policy_version` on ALL active `customer_account` records.
   - On application startup, `@PostConstruct` scans `audit_log` for the latest toggle event to restore the state.
 - **Files Modified:**
@@ -401,16 +401,16 @@ Executed command:
 | Test Class | Package | Tests Run | Failures | Errors | Result |
 |---|---|---|---|---|---|
 | `DeviceBootstrapIntegrationTest` | `com.elecsarthi.security` | 1 | 0 | 0 | **PASS** |
-| `SecurityRemediationIntegrationTest` | `com.elecsarthi.security` | 21 | 0 | 0 | **PASS** |
+| `SecurityRemediationIntegrationTest` | `com.elecsarthi.security` | 22 | 0 | 0 | **PASS** |
 | `VoterScopeGeographicIsolationIntegrationTest` | `com.elecsarthi.voter` | 4 | 0 | 0 | **PASS** |
 | `AuthServiceIntegrationTest` | `com.elecsarthi.security` | 7 | 0 | 0 | **PASS** |
 | `CustomerServiceIntegrationTest` | `com.elecsarthi.user` | 7 | 0 | 0 | **PASS** |
 | `DatasetServiceIntegrationTest` | `com.elecsarthi.dataset` | 8 | 0 | 0 | **PASS** |
 | `SaleServiceIntegrationTest` | `com.elecsarthi.sale` | 6 | 0 | 0 | **PASS** |
-| `SubuserServiceIntegrationTest` | `com.elecsarthi.subuser` | 4 | 0 | 0 | **PASS** |
+| `SubuserServiceIntegrationTest` | `com.elecsarthi.subuser` | 5 | 0 | 0 | **PASS** |
 | `VoterServiceIntegrationTest` | `com.elecsarthi.voter` | 5 | 0 | 0 | **PASS** |
 | `ElecSarthiApplicationTests` | `com.elecsarthi` | 1 | 0 | 0 | **PASS** |
-| **TOTAL** | | **64** | **0** | **0** | **100% PASS** |
+| **TOTAL** | | **66** | **0** | **0** | **100% PASS** |
 
 ---
 
@@ -511,4 +511,4 @@ Following the re-audit of commit `aa2b30e`, all remaining partial fixes and newl
 
 ## 6. Acceptance Audit Sign-Off
 
-All 21 original security findings and all 8 re-audit findings (N1–N8) have been comprehensively remediated, forensically audited, and verified via 64/64 automated integration tests and 83/83 PostgreSQL schema checks. The ElecSarthi backend is secure, resilient, fully isolated, and ready for production deployment.
+All 21 original security findings and all 8 re-audit findings (N1–N8) have been verified via 66/66 automated integration tests (`.\mvnw.cmd clean verify`) and 83/83 PostgreSQL schema checks (`tools/db/run_tests.ps1`). Operational readiness for production cutover remains subject to provisioning live environment secrets (`.env`) and valid TLS certificates in `./docker/nginx/certs/` (or an external TLS termination proxy).

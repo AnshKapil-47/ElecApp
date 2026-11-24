@@ -95,12 +95,13 @@ public class SaleServiceImpl implements SaleService {
             throw new ForbiddenException("Only agents can perform sales");
         }
 
+        // Ownership is checked before status, so a non-owning Agent learns nothing about another Agent's Customer.
         CustomerAccount customer = customerAccountRepository.requireById(request.getCustomerAccountId());
+        if (!customer.isOwnedByAgent(agentUserId)) {
+            throw new ResourceNotFoundException("Customer account not found");
+        }
         if (customer.getStatus() != UserStatus.ACTIVE) {
             throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "Customer account is suspended or not active", HttpStatus.BAD_REQUEST);
-        }
-        if (!customer.isOwnedByAgent(agentUserId)) {
-            throw new ForbiddenException("You are not the owning agent for this customer");
         }
 
         ElectionType electionType = electionTypeRepository.requireById(request.getElectionTypeId());
@@ -279,13 +280,13 @@ public class SaleServiceImpl implements SaleService {
     @Override
     @Transactional(readOnly = true)
     public SaleResponse getSale(Long callerUserId, Role callerRole, Long saleId) {
-        AgentSale sale = agentSaleRepository.findById(saleId)
-                .orElseThrow(() -> new ResourceNotFoundException("Sale not found"));
         if (callerRole == Role.SUBOWNER) {
             throw new ForbiddenException("Subowners are not permitted to view sales records");
         }
+        AgentSale sale = agentSaleRepository.findById(saleId)
+                .orElseThrow(() -> new ResourceNotFoundException("Sale not found"));
         if (callerRole == Role.AGENT && !sale.getSoldByUserId().equals(callerUserId)) {
-            throw new ForbiddenException("Agents can only view their own sales");
+            throw new ResourceNotFoundException("Sale not found");
         }
         return toResponse(sale);
     }
@@ -303,7 +304,7 @@ public class SaleServiceImpl implements SaleService {
             throw new ForbiddenException("Subowners cannot view sales records");
         }
         if (callerRole == Role.AGENT && !customerAccountRepository.requireById(customerAccountId).isOwnedByAgent(callerUserId)) {
-            throw new ForbiddenException("You are not the owning agent for this customer");
+            throw new ResourceNotFoundException("Customer account not found");
         }
         return toResponses(agentSaleRepository.findByCustomerAccountIdOrderBySoldAtDesc(customerAccountId));
     }

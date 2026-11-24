@@ -1,10 +1,18 @@
 package com.elecsarthi.security;
 
 import com.elecsarthi.dto.request.LoginRequest;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.UserDevice;
+import com.elecsarthi.enums.ActivationStatus;
+import com.elecsarthi.enums.ClientType;
+import com.elecsarthi.enums.DevicePlatform;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuthService;
 import com.elecsarthi.service.DeviceService;
@@ -25,8 +33,6 @@ import java.security.Signature;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.UUID;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -259,7 +265,7 @@ public class DeviceSecurityIntegrationTest extends SecurityIntegrationTestSuppor
 
         ApiException unauthAgentEx = assertThrows(ApiException.class, () ->
                 deviceService.revokeDevice(dev1.getId(), otherAgent.getId(), Role.AGENT, "127.0.0.1"));
-        assertEquals(403, unauthAgentEx.getStatus().value());
+        assertEquals(404, unauthAgentEx.getStatus().value(), "A device outside the Agent's own Customers is concealed");
 
         // Owning agent can revoke the device
         deviceService.revokeDevice(dev1.getId(), agent.getId(), Role.AGENT, "127.0.0.1");
@@ -454,10 +460,10 @@ public class DeviceSecurityIntegrationTest extends SecurityIntegrationTestSuppor
                         .content("{\"role\":\"OWNER\"}"))
                 .andExpect(status().isForbidden());
 
-        // 3. CUSTOMER cannot revoke another organization's SUBUSER device -> 403
+        // 3. CUSTOMER cannot revoke another organization's SUBUSER device; it is concealed as not found -> 404
         mockMvc.perform(post("/api/v1/devices/" + sub2Dev.getId() + "/revoke")
                         .header("Authorization", "Bearer " + cust1Token))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isNotFound());
 
         // 4. CUSTOMER CAN revoke subordinate SUBUSER device in own organization -> 200
         mockMvc.perform(post("/api/v1/devices/" + sub1Dev.getId() + "/revoke")
@@ -470,10 +476,10 @@ public class DeviceSecurityIntegrationTest extends SecurityIntegrationTestSuppor
                         .header("Authorization", "Bearer " + agent1Token))
                 .andExpect(status().isForbidden());
 
-        // 6. AGENT cannot revoke unassigned customer's device -> 403
+        // 6. AGENT cannot revoke unassigned customer's device; it is concealed as not found -> 404
         mockMvc.perform(post("/api/v1/devices/" + cust2Dev.getId() + "/revoke")
                         .header("Authorization", "Bearer " + agent1Token))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isNotFound());
 
         // 7. AGENT CAN revoke assigned customer's device -> 200
         mockMvc.perform(post("/api/v1/devices/" + cust1Dev.getId() + "/revoke")

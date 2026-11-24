@@ -44,8 +44,9 @@ config/       application properties and bean configuration
 .\mvnw.cmd test-compile          # compile only (no database needed)
 ```
 
-- **Integration tests** use the `test` profile and expect a PostgreSQL server at `127.0.0.1:5498`, database `es_test` (see `src/main/resources/application-test.yaml`). Flyway migrates it on startup.
+- **Integration tests** use the `test` profile and expect a PostgreSQL server at `127.0.0.1:5498`, database `es_test` (see `src/main/resources/application-test.yaml`) that is **already migrated**: the backend never runs migrations. Run `tools/db/run_tests.ps1` first; it recreates and migrates `es_test`.
 - **Schema tests** (every migration plus `tools/db/test_schema.sql`, must end with `failures: 0`): `tools/db/run_tests.sh` or `tools/db/run_tests.ps1`. Needs PostgreSQL and `psql`.
+- **Deployment migration test** (Docker required): `tools/deploy/test_migration_job.ps1 [-WithBackend]` runs the real `postgres -> migration -> runtime-role -> backend` chain from `docker-compose.yml` against an empty PostgreSQL 18.3. Production migrations are applied only by that one-shot job; see `docs/deployment/DEPLOYMENT_GUIDE.md` section 3.
 - **Run locally:** `.\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=dev"`. Production refuses to start with a missing or development key; see the deployment guide and `.env.example`.
 
 ## Tooling

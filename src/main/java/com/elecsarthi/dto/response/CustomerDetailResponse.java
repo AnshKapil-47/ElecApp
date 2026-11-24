@@ -2,7 +2,11 @@ package com.elecsarthi.dto.response;
 
 import com.elecsarthi.enums.ActivationStatus;
 import com.elecsarthi.enums.UserStatus;
-import lombok.*;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.time.Instant;
 

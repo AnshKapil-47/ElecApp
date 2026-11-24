@@ -1,5 +1,6 @@
 package com.elecsarthi.security.config;
 
+import java.util.Locale;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.security.filter.DeviceSignatureFilter;
 import com.elecsarthi.security.filter.JwtAuthenticationFilter;
@@ -104,13 +105,19 @@ public class SecurityConfig {
             if (appProperties.getCors() == null || appProperties.getCors().getAllowedOrigins() == null || appProperties.getCors().getAllowedOrigins().isEmpty()) {
                 throw new IllegalStateException("FATAL: Production CORS allowed origins must be explicitly configured!");
             }
+            if (appProperties.getCors().isAllowCredentials()) {
+                throw new IllegalStateException("FATAL: Production CORS must keep allowCredentials=false!");
+            }
             for (String origin : appProperties.getCors().getAllowedOrigins()) {
-                if (origin == null || origin.isBlank() || "*".equals(origin.trim())) {
+                if (origin == null || origin.isBlank() || origin.contains("*")) {
                     throw new IllegalStateException("FATAL: Production CORS origins cannot contain wildcards (*)");
                 }
-                String lower = origin.toLowerCase().trim();
-                if (lower.contains("localhost") || lower.contains("127.0.0.1")) {
-                    throw new IllegalStateException("FATAL: Production CORS origins cannot allow localhost in production: " + origin);
+                String lower = origin.toLowerCase(Locale.ROOT).trim();
+                if (lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("[::1]") || lower.contains("0.0.0.0")) {
+                    throw new IllegalStateException("FATAL: Production CORS origins cannot allow localhost or loopback origins in production: " + origin);
+                }
+                if (!lower.startsWith("https://")) {
+                    throw new IllegalStateException("FATAL: Production CORS origins must use HTTPS: " + origin);
                 }
             }
         }
@@ -120,7 +127,7 @@ public class SecurityConfig {
         if (value == null || value.isBlank()) {
             throw new IllegalStateException("FATAL: " + fieldName + " is required in production!");
         }
-        String lower = value.toLowerCase();
+        String lower = value.toLowerCase(Locale.ROOT);
         if (lower.contains("replace") || lower.contains("changeme") || lower.contains("example") || lower.contains("placeholder") || lower.contains("dev-pepper")) {
             throw new IllegalStateException("FATAL: " + fieldName + " contains an insecure placeholder in production: " + value);
         }

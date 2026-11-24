@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.time.Clock;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.StartSyncSessionRequest;
 import com.elecsarthi.dto.response.SyncChunkResponse;
@@ -48,7 +49,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -69,6 +72,7 @@ public class SyncServiceImpl implements SyncService {
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
     private final PlatformTransactionManager transactionManager;
+    private final Clock clock;
 
     private static final int DEFAULT_CHUNK_SIZE = 1000;
 
@@ -85,11 +89,14 @@ public class SyncServiceImpl implements SyncService {
 
         Entitlement ent = entitlementRepository.requireById(request.getEntitlementId());
 
-        if (!customerAccountId.equals(ent.getCustomerAccountId()) || ent.getStatus() != EntitlementStatus.ACTIVE) {
-            throw new ForbiddenException("Entitlement is not active or belongs to another customer");
+        if (!customerAccountId.equals(ent.getCustomerAccountId())) {
+            throw new ResourceNotFoundException("Entitlement not found");
+        }
+        if (ent.getStatus() != EntitlementStatus.ACTIVE) {
+            throw new ForbiddenException("Entitlement is not active");
         }
 
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
             throw new BadRequestException("Entitlement is expired or not yet valid");
         }
@@ -143,9 +150,9 @@ public class SyncServiceImpl implements SyncService {
 
         session = syncSessionRepository.save(session);
 
-        auditService.log(customerUserId, customerAccountId, ent.getDatasetId(), deviceId,
+        auditService.logDetails(customerUserId, customerAccountId, ent.getDatasetId(), deviceId,
                 "SYNC_SESSION_STARTED", AuditOutcome.SUCCESS, "sync_session", session.getId().toString(),
-                "{\"totalRecords\":" + totalRecords + ",\"chunks\":" + totalChunks + "}", null);
+                AuditService.details("totalRecords", totalRecords, "chunks", totalChunks), null);
 
         return mapToResponse(session);
     }
@@ -160,13 +167,8 @@ public class SyncServiceImpl implements SyncService {
         SyncSession session = syncSessionRepository.findById(sessionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Sync session not found"));
 
-        if (!session.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ForbiddenException("Session does not belong to this customer account");
-        }
-
-        // Recheck user matches session
-        if (!session.getUserId().equals(customerUserId)) {
-            throw new ForbiddenException("Sync session was initiated by a different user");
+        if (!session.getCustomerAccountId().equals(customerAccountId) || !session.getUserId().equals(customerUserId)) {
+            throw new ResourceNotFoundException("Sync session not found");
         }
 
         // Revalidate User status is ACTIVE
@@ -197,7 +199,7 @@ public class SyncServiceImpl implements SyncService {
             throw new ApiException(ErrorCode.SYNC_SESSION_INVALID, "Sync session is not active (status: " + session.getStatus() + ")", HttpStatus.BAD_REQUEST);
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         if (now.isAfter(session.getExpiresAt())) {
             // Autonomous commit of expired state via REQUIRES_NEW
             TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
@@ -275,16 +277,16 @@ public class SyncServiceImpl implements SyncService {
                 .orElseThrow(() -> new ResourceNotFoundException("Sync session not found"));
 
         if (!session.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ForbiddenException("Session does not belong to this customer account");
+            throw new ResourceNotFoundException("Sync session not found");
         }
 
         session.setStatus(SyncStatus.COMPLETED);
-        session.setCompletedAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
+        session.setCompletedAt(clock.instant().truncatedTo(ChronoUnit.MICROS));
         session = syncSessionRepository.save(session);
 
-        auditService.log(customerUserId, customerAccountId, null, session.getDeviceId(),
+        auditService.logDetails(customerUserId, customerAccountId, null, session.getDeviceId(),
                 "SYNC_SESSION_COMPLETED", AuditOutcome.SUCCESS, "sync_session", session.getId().toString(),
-                "{\"chunksDone\":" + session.getChunksDone() + "}", null);
+                AuditService.details("chunksDone", session.getChunksDone()), null);
 
         return mapToResponse(session);
     }

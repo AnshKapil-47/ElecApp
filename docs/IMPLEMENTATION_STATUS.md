@@ -3,7 +3,7 @@
 **Target Stack:** Java 25 LTS | Spring Boot 4.2.0 | PostgreSQL 18.3 (Port 5498)  
 **Architecture:** Centralized layered architecture (`com.elecsarthi`)  
 **Scope:** Strict Backend Only (No frontend, Flutter, mobile, or microservices)  
-**Status:** **100% COMPLETE & PRODUCTION READY** (All 21 audit findings and N1–N8 re-audit findings remediated and verified)
+**Status:** **CODE & TESTS VERIFIED** (All 21 audit findings and N1–N8 re-audit findings remediated; TLS certificate provisioning required prior to production cutover)
 
 ---
 
@@ -20,24 +20,24 @@
 | **Phase 6** | User Management & Customer Provisioning | **COMPLETED** | `CustomerServiceIntegrationTest` passed 7/7 (Crockford Base32, role scoping, phone masking, autonomous audit logging). |
 | **Phase 7** | Sales, Entitlements & Quantity Reports | **COMPLETED** | `SaleServiceIntegrationTest` passed 6/6 (canonical JSON idempotency, renewal, ambiguity guard, void, LONG_TERM recomputation, reports). |
 | **Phase 8** | Voter Engine & Live Turnout | **COMPLETED** | `VoterServiceIntegrationTest` (5/5) & `VoterScopeGeographicIsolationIntegrationTest` (4/4) passed (central authorizer, cross-AC IDOR prevention, fail-closed criteria, persistent DB-backed mobile toggle, turnout scoping). |
-| **Phase 9** | Subusers, Booth Assignments, Leases & Sync | **COMPLETED** | `SubuserServiceIntegrationTest` passed 4/4 (2 slots, Ed25519 lease signing, writeback, sync chunk re-validation). |
-| **Phase 10** | Security Hardening & Background Retention | **COMPLETED** | `SecurityRemediationIntegrationTest` passed 21/21 (activation lockout, transaction-scoped advisory locks, isolated `DatasetRetentionPurger`, SUPERSEDED dataset purging, device signature filter, audit JSON resilience, prod secret validation, registration token JTI durability & fail-closed check, copied token rejection, sync/lease lifecycle isolation, retention safety checks, mandatory mobile refresh proof, concurrency-safe advisory-locked token consumption, device replacement lockout, role-based revocation, autonomous DENIED audit, constant-time anti-enumeration, DB-backed mobile toggle, CORS allow-list validation). |
-| **Phase 11** | Production Readiness & Containerization | **COMPLETED** | Multi-stage `Dockerfile`, `docker-compose.yml` (localhost binding 127.0.0.1, internal network, non-root user), NGINX reverse proxy with TLS termination, rate-limiting, and 210MB body limits. |
+| **Phase 9** | Subusers, Booth Assignments, Leases & Sync | **COMPLETED** | `SubuserServiceIntegrationTest` passed 5/5 (2 slots, Ed25519 lease signing, strict `[issuedAt, expiresAt)` writeback boundary, sync chunk re-validation). |
+| **Phase 10** | Security Hardening & Background Retention | **COMPLETED** | `SecurityRemediationIntegrationTest` passed 22/22 (activation lockout, transaction-scoped advisory locks + contention/failure tests, isolated `DatasetRetentionPurger`, SUPERSEDED dataset purging, device signature filter, audit JSON resilience, prod secret validation, registration token JTI durability & fail-closed check, copied token rejection, sync/lease lifecycle isolation, retention safety checks, mandatory mobile refresh proof, concurrency-safe advisory-locked token consumption, device replacement lockout, HTTP 5-role revocation matrix, autonomous DENIED audit, constant-time anti-enumeration, DB-backed mobile toggle & outage masking, strict HTTPS CORS allow-list + `allowCredentials=false` validation). |
+| **Phase 11** | Production Readiness & Containerization | **COMPLETED (TLS Certs Pending Deployment)** | Multi-stage `Dockerfile`, `docker-compose.yml` (localhost binding 127.0.0.1, internal network, non-root user), NGINX reverse proxy configured for TLSv1.2/1.3, rate-limiting, and 210MB body limits (requires certificate files at `./docker/nginx/certs/` or external TLS terminator at deployment). |
 | **Phase 12** | Documentation & Audit Resolution | **COMPLETED** | `FINAL_SECURITY_REMEDIATION_REPORT.md`, `API_REFERENCE.md`, `SECURITY_IMPLEMENTATION.md`, `DEPLOYMENT_GUIDE.md`. |
 
 ---
 
 ## 2. Test Execution Suite Evidence
 
-### 2.1 Summary of Test Suites (64/64 Tests Passed)
+### 2.1 Summary of Test Suites (66/66 Tests Passed)
 - Total Test Classes: 10
-- Total Tests Run: 64
+- Total Tests Run: 66
 - Failures: 0, Errors: 0, Skipped: 0
 - Execution Result: **100% BUILD SUCCESS**
 
-### 2.2 SecurityRemediationIntegrationTest (21/21 Passed)
+### 2.2 SecurityRemediationIntegrationTest (22/22 Passed)
 - **Suite:** `com.elecsarthi.security.SecurityRemediationIntegrationTest`
-- **Results:** `Tests run: 21, Failures: 0, Errors: 0, Skipped: 0` (PASS)
+- **Results:** `Tests run: 22, Failures: 0, Errors: 0, Skipped: 0` (PASS)
 - **Features Tested:**
   1. Customer activation lockout: 5 failed attempts increment counter across exceptions; 6th attempt locks out.
   2. Scheduled retention execution: daily 02:00 purge drops expired `MASTER` partitions; hourly job terminates expired sessions (`ABSOLUTE_EXPIRED`).
@@ -119,13 +119,13 @@
 
 ### 2.8 SubuserServiceIntegrationTest
 - **Suite:** `com.elecsarthi.subuser.SubuserServiceIntegrationTest`
-- **Results:** `Tests run: 4, Failures: 0, Errors: 0, Skipped: 0` (PASS)
+- **Results:** `Tests run: 5, Failures: 0, Errors: 0, Skipped: 0` (PASS)
 - **Features Tested:**
   - Subuser provisioning exclusively by Customer.
   - Booth assignments: max 2 active slots per subuser, max 7 days (`ck_ba_seven_days`), bounded by entitlement.
   - Booth assignment revocation (frees slot).
   - Offline booth lease: Ed25519 digital signature verification, max 24h expiry.
-  - Offline writeback: accepts marks before lease expiry; rejects marks after expiry.
+  - Offline writeback: enforces strict interval `issuedAt <= offlineMarkedAt < expiresAt` (accepts at issuance, rejects before issuance, rejects at exact expiration, rejects after expiration).
   - Bulk sync: Customer only (Subusers forbidden), chunk retrieval with re-validation, completion.
 
 ### 2.9 DatasetServiceIntegrationTest
@@ -154,7 +154,8 @@
 
 ## 3. Grand Total Verification Summary
 
-- **Total Integration Tests:** 57 / 57 PASS across all 10 suites (100%)
+- **Total Integration Tests:** 66 / 66 PASS across all 10 suites (100%)
 - **Total Schema Checks:** 83 / 83 PASS (100%)
-- **Total Security Findings Remediated:** 21 / 21 RESOLVED (100%)
+- **Total Security Findings Remediated:** 21 / 21 primary + 8 / 8 re-audit (N1–N8) RESOLVED (100%)
 - **Architecture Status:** Strictly centralized layered architecture (`com.elecsarthi`), Java 25 LTS, Spring Boot 4.2.0, PostgreSQL 18.3, zero new database tables, zero monetary columns, strictly 5 canonical roles.
+- **Deployment Prerequisites:** Provision production `.env` secrets and TLS certificates (`./docker/nginx/certs/fullchain.pem` and `privkey.pem`) or configure external TLS termination prior to production launch.

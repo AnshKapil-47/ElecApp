@@ -1,11 +1,11 @@
 package com.elecsarthi.service.impl;
 
+import java.util.Locale;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.DeviceRegisterRequest;
 import com.elecsarthi.dto.request.DeviceVerifyRequest;
 import com.elecsarthi.dto.response.DeviceRegisterResponse;
 import com.elecsarthi.entity.AppUser;
-import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.DeviceNonce;
 import com.elecsarthi.entity.UserDevice;
 import com.elecsarthi.enums.AuditOutcome;
@@ -137,9 +137,9 @@ public class DeviceServiceImpl implements DeviceService {
 
         device = deviceRepository.save(device);
 
-        auditService.log(userId, user.getCustomerAccountId(), null, device.getId(),
+        auditService.logDetails(userId, user.getCustomerAccountId(), null, device.getId(),
                 "DEVICE_REGISTER_INITIATED", AuditOutcome.SUCCESS, "user_device", device.getId().toString(),
-                "{\"installationId\":\"" + request.getInstallationId() + "\"}", clientIp);
+                AuditService.details("installationId", request.getInstallationId()), clientIp);
 
         return DeviceRegisterResponse.builder()
                 .deviceId(device.getId())
@@ -196,9 +196,9 @@ public class DeviceServiceImpl implements DeviceService {
         );
 
         if (!signatureValid) {
-            auditService.log(userId, pendingDevice.getCustomerAccountId(), null, pendingDevice.getId(),
+            auditService.logDetails(userId, pendingDevice.getCustomerAccountId(), null, pendingDevice.getId(),
                     "DEVICE_VERIFICATION", AuditOutcome.DENIED, "user_device", pendingDevice.getId().toString(),
-                    "{\"reason\":\"Invalid signature\"}", clientIp);
+                    AuditService.details("reason", "Invalid signature"), clientIp);
             throw new ApiException(ErrorCode.INVALID_DEVICE_SIGNATURE, "Device challenge signature verification failed", HttpStatus.BAD_REQUEST);
         }
 
@@ -214,9 +214,9 @@ public class DeviceServiceImpl implements DeviceService {
             tokenProvider.invalidateRegistrationJti(registrationJti.trim());
         }
 
-        auditService.log(userId, pendingDevice.getCustomerAccountId(), null, pendingDevice.getId(),
+        auditService.logDetails(userId, pendingDevice.getCustomerAccountId(), null, pendingDevice.getId(),
                 "DEVICE_VERIFY_SUCCESS", AuditOutcome.SUCCESS, "user_device", pendingDevice.getId().toString(),
-                "{\"installationId\":\"" + pendingDevice.getInstallationId() + "\"}", clientIp);
+                AuditService.details("installationId", pendingDevice.getInstallationId()), clientIp);
     }
 
     @Override
@@ -240,17 +240,18 @@ public class DeviceServiceImpl implements DeviceService {
             // Owner and Subowner have authority to revoke any device
         } else if (effectiveRole == Role.AGENT) {
             // Agent can only revoke devices belonging to customers assigned to this agent (or their subusers)
-            if (device.getCustomerAccountId() == null) {
+            if (device.getUserId().equals(callerUserId)) {
                 throw new ForbiddenException("Agents can only revoke devices for their assigned customers.");
             }
-            CustomerAccount customer = customerAccountRepository.requireById(device.getCustomerAccountId());
-            if (!customer.isOwnedByAgent(callerUserId)) {
-                throw new ForbiddenException("Agents can only revoke devices for their assigned customers.");
+            // A device outside the Agent's own Customers is reported as not found.
+            if (device.getCustomerAccountId() == null
+                    || !customerAccountRepository.requireById(device.getCustomerAccountId()).isOwnedByAgent(callerUserId)) {
+                throw new ResourceNotFoundException("Device not found");
             }
         } else if (effectiveRole == Role.CUSTOMER) {
             // Customer can only revoke subordinate SUBUSER devices within their own customer account
             if (device.getCustomerAccountId() == null || !device.getCustomerAccountId().equals(callerUser.getCustomerAccountId())) {
-                throw new ForbiddenException("Customers can only revoke devices belonging to their own organization.");
+                throw new ResourceNotFoundException("Device not found");
             }
             AppUser deviceUser = userRepository.findById(device.getUserId())
                     .orElseThrow(() -> new ResourceNotFoundException("Device user not found"));
@@ -274,9 +275,9 @@ public class DeviceServiceImpl implements DeviceService {
         jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? WHERE device_id = ? AND revoked_at IS NULL",
                 java.sql.Timestamp.from(now), callerUserId, deviceId);
 
-        auditService.log(callerUserId, device.getCustomerAccountId(), null, device.getId(),
+        auditService.logDetails(callerUserId, device.getCustomerAccountId(), null, device.getId(),
                 "DEVICE_REVOKE", AuditOutcome.SUCCESS, "user_device", device.getId().toString(),
-                "{\"revokedByRole\":\"" + effectiveRole.name() + "\"}", clientIp);
+                AuditService.details("revokedByRole", effectiveRole.name()), clientIp);
     }
 
     @Override
@@ -326,7 +327,7 @@ public class DeviceServiceImpl implements DeviceService {
         // Build canonical string to sign
         String bodySha256 = CryptoUtils.sha256Hex(body != null ? body : new byte[0]);
         String payloadToVerify = String.join("\n",
-                method.toUpperCase(),
+                method.toUpperCase(Locale.ROOT),
                 path,
                 bodySha256,
                 String.valueOf(timestampEpochMs),

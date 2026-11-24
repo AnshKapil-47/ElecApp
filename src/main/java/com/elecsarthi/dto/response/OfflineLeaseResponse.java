@@ -1,6 +1,10 @@
 package com.elecsarthi.dto.response;
 
-import lombok.*;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -18,7 +22,6 @@ public class OfflineLeaseResponse {
     private long leaseSeq;
     private int boothValue;
     private Long entitlementId;
-    private Long datasetId;
     private Instant issuedAt;
     private Instant expiresAt;
     private String payloadJson;

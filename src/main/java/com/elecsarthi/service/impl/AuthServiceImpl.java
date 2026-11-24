@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import com.elecsarthi.dto.request.DeviceProof;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.CustomerActivateRequest;
 import com.elecsarthi.dto.request.LoginRequest;
@@ -117,15 +118,15 @@ public class AuthServiceImpl implements AuthService {
                 customerAccountRepository.findByContactPhone(identifier)
                         .flatMap(customer -> userRepository.findByCustomerAccountIdAndRole(customer.getId(), Role.CUSTOMER)));
         if (found.isEmpty()) {
-            auditService.log(null, null, null, null, "LOGIN", AuditOutcome.DENIED,
-                    "app_user", identifier, "{\"reason\":\"User not found\"}", clientIp);
+            auditService.logDetails(null, null, null, null, "LOGIN", AuditOutcome.DENIED,
+                    "app_user", identifier, AuditService.details("reason", "User not found"), clientIp);
             throw new UnauthorizedException("Invalid username or password.");
         }
 
         AppUser user = userRepository.findByIdForUpdate(found.get().getId()).orElse(found.get());
         if (user.getPasswordHash() == null || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
-            auditService.log(user.getId(), user.getCustomerAccountId(), null, null, "LOGIN", AuditOutcome.DENIED,
-                    "app_user", user.getUsername(), "{\"reason\":\"Bad credentials\"}", clientIp);
+            auditService.logDetails(user.getId(), user.getCustomerAccountId(), null, null, "LOGIN", AuditOutcome.DENIED,
+                    "app_user", user.getUsername(), AuditService.details("reason", "Bad credentials"), clientIp);
             throw new UnauthorizedException("Invalid username or password.");
         }
         return user;
@@ -267,9 +268,9 @@ public class AuthServiceImpl implements AuthService {
         }
         sessionRepository.save(session.build());
 
-        auditService.log(user.getId(), user.getCustomerAccountId(), null,
+        auditService.logDetails(user.getId(), user.getCustomerAccountId(), null,
                 device != null ? device.getId() : null, "LOGIN", AuditOutcome.SUCCESS,
-                "user_session", sessionId.toString(), "{\"clientType\":\"" + clientType + "\"}", clientIp);
+                "user_session", sessionId.toString(), AuditService.details("clientType", clientType), clientIp);
 
         return LoginResponse.builder()
                 .sessionId(sessionId)
@@ -286,12 +287,6 @@ public class AuthServiceImpl implements AuthService {
                 .build();
     }
 
-    @Override
-    @Transactional(noRollbackFor = {ApiException.class})
-    public TokenRefreshResponse refreshToken(RefreshTokenRequest request, String clientIp) {
-        return refreshToken(request, clientIp, null, null, null, null, null, null);
-    }
-
     /**
      * Rotates a mobile refresh token. Besides the token itself, the caller must prove possession of the
      * session's ACTIVE device with a signed request. A reused (older) generation or a hash mismatch terminates
@@ -299,9 +294,7 @@ public class AuthServiceImpl implements AuthService {
      */
     @Override
     @Transactional(noRollbackFor = {ApiException.class})
-    public TokenRefreshResponse refreshToken(RefreshTokenRequest request, String clientIp, String deviceIdHeader,
-                                             String deviceSignature, String deviceTimestamp, String deviceNonce,
-                                             String deviceCounter, String deviceContextId) {
+    public TokenRefreshResponse refreshToken(RefreshTokenRequest request, String clientIp, DeviceProof proof) {
         rateLimiterService.checkRateLimit("refresh_ip", clientIp, 60);
         Instant now = clock.instant();
 
@@ -328,9 +321,9 @@ public class AuthServiceImpl implements AuthService {
         if (presentedGeneration < session.getRefreshTokenGeneration()) {
             session.terminate(now, "REFRESH_REUSE", null);
             sessionRepository.save(session);
-            auditService.log(session.getUserId(), null, null, session.getDeviceId(),
+            auditService.logDetails(session.getUserId(), null, null, session.getDeviceId(),
                     "REFRESH_REUSE", AuditOutcome.DENIED, "user_session", sessionId.toString(),
-                    "{\"presentedGen\":" + presentedGeneration + ",\"storedGen\":" + session.getRefreshTokenGeneration() + "}", clientIp);
+                    AuditService.details("presentedGen", presentedGeneration, "storedGen", session.getRefreshTokenGeneration()), clientIp);
             throw new ApiException(ErrorCode.REFRESH_TOKEN_REUSE, "Token reuse detected. Session terminated.", HttpStatus.UNAUTHORIZED);
         }
         if (!CryptoUtils.sha256Hex(request.getRefreshToken()).equals(session.getRefreshTokenHash())) {
@@ -355,15 +348,15 @@ public class AuthServiceImpl implements AuthService {
             throw new UnauthorizedException("Refresh tokens are only supported for mobile sessions.");
         }
 
-        if (deviceIdHeader == null || deviceIdHeader.isBlank()) {
+        if (proof.deviceId() == null || proof.deviceId().isBlank()) {
             throw new UnauthorizedException("Missing required X-Device-Id header.");
         }
-        String signature = requireDeviceProofHeader(deviceSignature, "X-Device-Signature");
-        String timestamp = requireDeviceProofHeader(deviceTimestamp, "X-Device-Timestamp");
-        String nonce = requireDeviceProofHeader(deviceNonce, "X-Device-Nonce");
-        String counter = requireDeviceProofHeader(deviceCounter, "X-Device-Counter");
+        String signature = requireDeviceProofHeader(proof.signature(), "X-Device-Signature");
+        String timestamp = requireDeviceProofHeader(proof.timestamp(), "X-Device-Timestamp");
+        String nonce = requireDeviceProofHeader(proof.nonce(), "X-Device-Nonce");
+        String counter = requireDeviceProofHeader(proof.counter(), "X-Device-Counter");
 
-        requireBoundDevice(session, deviceIdHeader.trim(), clientIp);
+        requireBoundDevice(session, proof.deviceId().trim(), clientIp);
 
         long timestampValue;
         long counterValue;
@@ -375,7 +368,7 @@ public class AuthServiceImpl implements AuthService {
         }
         deviceService.validateSignedRequest(session.getDeviceId(), "POST", REFRESH_PATH,
                 request.getRefreshToken().getBytes(StandardCharsets.UTF_8),
-                timestampValue, nonce, counterValue, deviceContextId, signature);
+                timestampValue, nonce, counterValue, proof.contextId(), signature);
 
         int nextGeneration = presentedGeneration + 1;
         String newRefreshToken = newRefreshToken(sessionId, nextGeneration);
@@ -448,9 +441,9 @@ public class AuthServiceImpl implements AuthService {
         Optional<CustomerAccount> found = customerAccountRepository.findByContactPhone(request.getContactPhone());
         if (found.isEmpty()) {
             // Same work as a real check, so response timing does not reveal whether the phone is registered.
-            CryptoUtils.hmacSha256Hex(request.getActivationCode() != null ? request.getActivationCode().toUpperCase() : "DUMMY", pepper);
-            auditService.log(null, null, null, null, "CUSTOMER_ACTIVATION", AuditOutcome.DENIED, "customer_account", "UNKNOWN",
-                    "{\"reason\":\"Invalid activation credentials or account not eligible\"}", clientIp);
+            CryptoUtils.hmacSha256Hex(request.getActivationCode() != null ? request.getActivationCode().toUpperCase(Locale.ROOT) : "DUMMY", pepper);
+            auditService.logDetails(null, null, null, null, "CUSTOMER_ACTIVATION", AuditOutcome.DENIED, "customer_account", "UNKNOWN",
+                    AuditService.details("reason", "Invalid activation credentials or account not eligible"), clientIp);
             throw new BadRequestException(INVALID_ACTIVATION);
         }
         CustomerAccount customer = found.get();
@@ -468,7 +461,7 @@ public class AuthServiceImpl implements AuthService {
                     "Activation code has expired. Please request a new code.", HttpStatus.BAD_REQUEST);
         }
 
-        String presentedHash = CryptoUtils.hmacSha256Hex(request.getActivationCode().toUpperCase(), pepper);
+        String presentedHash = CryptoUtils.hmacSha256Hex(request.getActivationCode().toUpperCase(Locale.ROOT), pepper);
         if (!hashesMatch(presentedHash, customer.getActivationCodeHash())) {
             short attempts = (short) (customer.getActivationAttemptCount() + 1);
             recordFailedActivation(customer.getId(), attempts, clientIp);
@@ -506,8 +499,8 @@ public class AuthServiceImpl implements AuthService {
         requiresNew.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         requiresNew.executeWithoutResult(status -> {
             jdbcTemplate.update("UPDATE customer_account SET activation_attempt_count = ? WHERE id = ?", attempts, customerId);
-            auditService.log(null, customerId, null, null, "CUSTOMER_ACTIVATE", AuditOutcome.DENIED,
-                    "customer_account", customerId.toString(), "{\"reason\":\"Invalid code attempt\"}", clientIp);
+            auditService.logDetails(null, customerId, null, null, "CUSTOMER_ACTIVATE", AuditOutcome.DENIED,
+                    "customer_account", customerId.toString(), AuditService.details("reason", "Invalid code attempt"), clientIp);
         });
     }
 

@@ -1,12 +1,46 @@
 package com.elecsarthi.sale;
 
-import com.elecsarthi.dto.request.*;
-import com.elecsarthi.dto.response.*;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.dto.request.CreateSaleRequest;
+import com.elecsarthi.dto.request.DirectEntitlementRequest;
+import com.elecsarthi.dto.request.SaleLineRequest;
+import com.elecsarthi.dto.request.VoidSaleRequest;
+import com.elecsarthi.dto.response.EntitlementResponse;
+import com.elecsarthi.dto.response.SaleLineResponse;
+import com.elecsarthi.dto.response.SaleResponse;
+import com.elecsarthi.dto.response.SalesReportResponse;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.BoothAssignment;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.Dataset;
+import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.Entitlement;
+import com.elecsarthi.entity.OfflineLease;
+import com.elecsarthi.entity.UserDevice;
+import com.elecsarthi.enums.ActivationStatus;
+import com.elecsarthi.enums.BoothAssignmentStatus;
+import com.elecsarthi.enums.DatasetStatus;
+import com.elecsarthi.enums.DatasetTier;
+import com.elecsarthi.enums.DevicePlatform;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.DurationUnit;
+import com.elecsarthi.enums.ElectionTypeCode;
+import com.elecsarthi.enums.EntitlementSource;
+import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.SaleStatus;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ConflictException;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AgentSaleLineRepository;
+import com.elecsarthi.repository.AgentSaleRepository;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.BoothAssignmentRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
+import com.elecsarthi.repository.DatasetRepository;
+import com.elecsarthi.repository.ElectionTypeRepository;
+import com.elecsarthi.repository.EntitlementRepository;
+import com.elecsarthi.repository.OfflineLeaseRepository;
+import com.elecsarthi.repository.UserDeviceRepository;
 import com.elecsarthi.service.EntitlementService;
 import com.elecsarthi.service.ReportService;
 import com.elecsarthi.service.SaleService;
@@ -22,7 +56,10 @@ import org.springframework.test.context.ActiveProfiles;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -319,9 +356,9 @@ public class SaleServiceIntegrationTest {
                 ))
                 .build();
 
-        // 1. Agent 2 attempts to sell to Customer 1 -> 403 FORBIDDEN
+        // 1. Agent 2 attempts to sell to Customer 1: the Customer is outside Agent 2's scope -> 404, never 403
         ApiException ex1 = assertThrows(ApiException.class, () -> saleService.createSale(agent2.getId(), request));
-        assertEquals(com.elecsarthi.exception.errorcode.ErrorCode.FORBIDDEN, ex1.getErrorCode());
+        assertEquals(com.elecsarthi.exception.errorcode.ErrorCode.RESOURCE_NOT_FOUND, ex1.getErrorCode());
 
         // 2. Subowner attempts to sell -> 403 FORBIDDEN
         ApiException ex2 = assertThrows(ApiException.class, () -> saleService.createSale(subowner.getId(), request));

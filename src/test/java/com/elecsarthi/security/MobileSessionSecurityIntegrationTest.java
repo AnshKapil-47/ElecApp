@@ -1,9 +1,19 @@
 package com.elecsarthi.security;
 
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.dto.request.DeviceProof;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.UserDevice;
+import com.elecsarthi.entity.UserSession;
+import com.elecsarthi.enums.ClientType;
+import com.elecsarthi.enums.DevicePlatform;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.SessionStatus;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuthService;
 import com.elecsarthi.service.DeviceService;
@@ -23,8 +33,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.UUID;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -232,7 +240,7 @@ public class MobileSessionSecurityIntegrationTest extends SecurityIntegrationTes
 
         // 1. Attacker attempts to refresh without headers -> Rejected with 401 UNAUTHORIZED
         ApiException missingHeadersEx = assertThrows(ApiException.class, () ->
-                authService.refreshToken(refReq, "10.0.0.99"));
+                authService.refreshToken(refReq, "10.0.0.99", DeviceProof.absent()));
         assertEquals("UNAUTHORIZED", missingHeadersEx.getErrorCode().name());
 
         // 2. Attacker attempts to refresh with attacker device ID and valid attacker signature -> Rejected with 401 REFRESH_DEVICE_MISMATCH
@@ -247,8 +255,7 @@ public class MobileSessionSecurityIntegrationTest extends SecurityIntegrationTes
         }
 
         ApiException mismatchEx = assertThrows(ApiException.class, () ->
-                authService.refreshToken(refReq, "10.0.0.99", attackerDevice.getId().toString(),
-                        sigAttacker, String.valueOf(ts), nonceAttacker, String.valueOf(counterAttacker), null));
+                authService.refreshToken(refReq, "10.0.0.99", new DeviceProof(attackerDevice.getId().toString(), sigAttacker, String.valueOf(ts), nonceAttacker, String.valueOf(counterAttacker), null)));
         assertEquals("UNAUTHORIZED", mismatchEx.getErrorCode().name());
 
         // 3. Legitimate device refresh with all 5 valid proof headers -> Succeeds!
@@ -261,8 +268,7 @@ public class MobileSessionSecurityIntegrationTest extends SecurityIntegrationTes
             throw new RuntimeException(e);
         }
 
-        com.elecsarthi.dto.response.TokenRefreshResponse refreshResp = authService.refreshToken(refReq, "10.0.0.1", legitimateDevice.getId().toString(),
-                sigLegit, String.valueOf(ts), nonceLegit, String.valueOf(counterLegit), null);
+        com.elecsarthi.dto.response.TokenRefreshResponse refreshResp = authService.refreshToken(refReq, "10.0.0.1", new DeviceProof(legitimateDevice.getId().toString(), sigLegit, String.valueOf(ts), nonceLegit, String.valueOf(counterLegit), null));
         assertNotNull(refreshResp.getAccessToken());
         assertNotNull(refreshResp.getRefreshToken());
         assertNotEquals(wireRefreshToken, refreshResp.getRefreshToken());
@@ -341,51 +347,50 @@ public class MobileSessionSecurityIntegrationTest extends SecurityIntegrationTes
 
         // A. Missing X-Device-Id -> 401 UNAUTHORIZED
         ApiException ex1 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", null, validSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof(null, validSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null)));
         assertEquals("UNAUTHORIZED", ex1.getErrorCode().name());
 
         // B. Missing X-Device-Signature -> 401 INVALID_DEVICE_SIGNATURE
         ApiException ex2 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", device.getId().toString(), null, String.valueOf(ts), nonce1, String.valueOf(counter1), null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof(device.getId().toString(), null, String.valueOf(ts), nonce1, String.valueOf(counter1), null)));
         assertEquals("INVALID_DEVICE_SIGNATURE", ex2.getErrorCode().name());
 
         // C. Missing X-Device-Timestamp -> 401 INVALID_DEVICE_SIGNATURE
         ApiException ex3 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", device.getId().toString(), validSig, null, nonce1, String.valueOf(counter1), null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof(device.getId().toString(), validSig, null, nonce1, String.valueOf(counter1), null)));
         assertEquals("INVALID_DEVICE_SIGNATURE", ex3.getErrorCode().name());
 
         // D. Missing X-Device-Nonce -> 401 INVALID_DEVICE_SIGNATURE
         ApiException ex4 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", device.getId().toString(), validSig, String.valueOf(ts), null, String.valueOf(counter1), null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof(device.getId().toString(), validSig, String.valueOf(ts), null, String.valueOf(counter1), null)));
         assertEquals("INVALID_DEVICE_SIGNATURE", ex4.getErrorCode().name());
 
         // E. Missing X-Device-Counter -> 401 INVALID_DEVICE_SIGNATURE
         ApiException ex5 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", device.getId().toString(), validSig, String.valueOf(ts), nonce1, null, null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof(device.getId().toString(), validSig, String.valueOf(ts), nonce1, null, null)));
         assertEquals("INVALID_DEVICE_SIGNATURE", ex5.getErrorCode().name());
 
         // F. Malformed X-Device-Id -> 401 UNAUTHORIZED
         ApiException ex6 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", "not-a-uuid", validSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof("not-a-uuid", validSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null)));
         assertEquals("UNAUTHORIZED", ex6.getErrorCode().name());
 
         // G. Invalid signature (signed with different key) -> 401 INVALID_DEVICE_SIGNATURE
         KeyPair wrongKp = generateEcKeyPair();
         String wrongSig = signRefresh(wrongKp.getPrivate(), wireToken, ts, nonce1, counter1);
         ApiException ex7 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", device.getId().toString(), wrongSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof(device.getId().toString(), wrongSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null)));
         assertEquals("INVALID_DEVICE_SIGNATURE", ex7.getErrorCode().name());
 
         // H. Expired timestamp (> window, e.g. 1 hour ago) -> 400 BAD_REQUEST
         long expiredTs = ts - (60L * 60L * 1000L);
         String expiredSig = signRefresh(kp.getPrivate(), wireToken, expiredTs, nonce1, counter1);
         ApiException ex8 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(req, "127.0.0.1", device.getId().toString(), expiredSig, String.valueOf(expiredTs), nonce1, String.valueOf(counter1), null));
+                authService.refreshToken(req, "127.0.0.1", new DeviceProof(device.getId().toString(), expiredSig, String.valueOf(expiredTs), nonce1, String.valueOf(counter1), null)));
         assertEquals("BAD_REQUEST", ex8.getErrorCode().name());
 
         // I. Valid refresh succeeds
-        com.elecsarthi.dto.response.TokenRefreshResponse rotated = authService.refreshToken(
-                req, "127.0.0.1", device.getId().toString(), validSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null);
+        com.elecsarthi.dto.response.TokenRefreshResponse rotated = authService.refreshToken(req, "127.0.0.1", new DeviceProof(device.getId().toString(), validSig, String.valueOf(ts), nonce1, String.valueOf(counter1), null));
         assertNotNull(rotated.getRefreshToken());
 
         // J. Replayed nonce with new token -> 400 REPLAYED_NONCE
@@ -393,14 +398,14 @@ public class MobileSessionSecurityIntegrationTest extends SecurityIntegrationTes
         long counter2 = 2L;
         String replayedNonceSig = signRefresh(kp.getPrivate(), rotated.getRefreshToken(), ts, nonce1, counter2);
         ApiException ex9 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(rotatedReq, "127.0.0.1", device.getId().toString(), replayedNonceSig, String.valueOf(ts), nonce1, String.valueOf(counter2), null));
+                authService.refreshToken(rotatedReq, "127.0.0.1", new DeviceProof(device.getId().toString(), replayedNonceSig, String.valueOf(ts), nonce1, String.valueOf(counter2), null)));
         assertEquals("REPLAYED_NONCE", ex9.getErrorCode().name());
 
         // K. Non-increasing counter (counter 1 replayed while lastRequestCounter is 1) -> 400 BAD_REQUEST
         String nonce2 = UUID.randomUUID().toString();
         String nonIncSig = signRefresh(kp.getPrivate(), rotated.getRefreshToken(), ts, nonce2, 1L);
         ApiException ex10 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(rotatedReq, "127.0.0.1", device.getId().toString(), nonIncSig, String.valueOf(ts), nonce2, "1", null));
+                authService.refreshToken(rotatedReq, "127.0.0.1", new DeviceProof(device.getId().toString(), nonIncSig, String.valueOf(ts), nonce2, "1", null)));
         assertEquals("BAD_REQUEST", ex10.getErrorCode().name());
 
         // L. Revoked device -> 401 DEVICE_REVOKED
@@ -409,7 +414,7 @@ public class MobileSessionSecurityIntegrationTest extends SecurityIntegrationTes
         String nonce3 = UUID.randomUUID().toString();
         String afterRevokeSig = signRefresh(kp.getPrivate(), rotated.getRefreshToken(), ts, nonce3, counter3);
         ApiException ex11 = assertThrows(ApiException.class, () ->
-                authService.refreshToken(rotatedReq, "127.0.0.1", device.getId().toString(), afterRevokeSig, String.valueOf(ts), nonce3, String.valueOf(counter3), null));
+                authService.refreshToken(rotatedReq, "127.0.0.1", new DeviceProof(device.getId().toString(), afterRevokeSig, String.valueOf(ts), nonce3, String.valueOf(counter3), null)));
         // Session terminated or device revoked gives 401 UNAUTHORIZED / SESSION_TERMINATED / DEVICE_REVOKED
         assertEquals(401, ex11.getStatus().value());
     }

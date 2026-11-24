@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.util.Locale;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.DatasetUploadRequest;
 import com.elecsarthi.dto.response.DatasetDetailResponse;
@@ -31,8 +32,11 @@ import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler;
 import org.apache.poi.xssf.model.SharedStringsTable;
 import org.apache.poi.xssf.model.StylesTable;
 import org.springframework.http.HttpStatus;
+import org.postgresql.PGConnection;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 import org.xml.sax.InputSource;
 import org.xml.sax.XMLReader;
@@ -45,6 +49,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -78,6 +83,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
     private final DatasetMapper datasetMapper;
     private final AppProperties appProperties;
     private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
     private final Clock clock;
 
     @Override
@@ -86,7 +92,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             throw new BadRequestException("File is required.");
         }
         String originalFilename = file.getOriginalFilename();
-        if (originalFilename == null || !originalFilename.toLowerCase().endsWith(".xlsx")) {
+        if (originalFilename == null || !originalFilename.toLowerCase(Locale.ROOT).endsWith(".xlsx")) {
             throw new BadRequestException("Only .xlsx Excel files are supported.");
         }
         electionTypeRepository.findByCode(request.getElectionTypeCode())
@@ -116,8 +122,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
 
             jdbcTemplate.execute("SELECT create_dataset_partitions(" + datasetId + ");");
 
-            VoterSheetHandler rows = new VoterSheetHandler(datasetId, textColumnsToNormalize(), jdbcTemplate, appProperties, now);
-            streamXlsx(tempFile, rows);
+            VoterSheetHandler rows = copyRows(tempFile, datasetId, now);
 
             rejectOverlap(datasetId, request.getStorageTier(), request.getSupersedesDatasetId());
             jdbcTemplate.execute("SELECT create_dataset_indexes(" + datasetId + ");");
@@ -136,9 +141,9 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             dataset.setCompletedAt(clock.instant());
             dataset = datasetRepository.save(dataset);
 
-            auditService.log(callerUserId, null, datasetId, null, "DATASET_IMPORT", AuditOutcome.SUCCESS,
+            auditService.logDetails(callerUserId, null, datasetId, null, "DATASET_IMPORT", AuditOutcome.SUCCESS,
                     "dataset", datasetId.toString(),
-                    "{\"rows\":" + rows.importedRows() + ",\"tier\":\"" + request.getStorageTier() + "\"}", null);
+                    AuditService.details("rows", rows.importedRows(), "tier", request.getStorageTier()), null);
 
             return datasetMapper.toDetailResponse(dataset, rows.issues());
         } catch (Exception e) {
@@ -208,18 +213,46 @@ public class DatasetImportServiceImpl implements DatasetImportService {
         for (ElectionType electionType : electionTypeRepository.findAll()) {
             String guard = electionType.getGuardColumn();
             if (guard != null && !guard.isBlank()) {
-                columns.add(guard.toLowerCase().trim());
+                columns.add(guard.toLowerCase(Locale.ROOT).trim());
             }
         }
         for (ElectionTypeField field : fieldRepository.findAll()) {
             if (field.getUsage() == FieldUsage.FILTER && field.getSourceColumn() != null) {
-                String column = field.getSourceColumn().toLowerCase().trim();
+                String column = field.getSourceColumn().toLowerCase(Locale.ROOT).trim();
                 if (!VoterSheetHandler.INT_COLUMNS.contains(column)) {
                     columns.add(column);
                 }
             }
         }
         return columns;
+    }
+
+    /**
+     * Streams the workbook into the dataset's partition with a single PostgreSQL COPY, on the connection of one
+     * transaction: either every row is loaded or, if anything fails, none is. The workbook is read with the
+     * streaming parser, so neither the file nor the rows are ever held in memory as a whole.
+     */
+    private VoterSheetHandler copyRows(Path file, Long datasetId, Instant importedAt) {
+        Set<String> textColumns = textColumnsToNormalize();
+        String copyStatement = VoterCopyWriter.copyStatement(datasetId, VoterSheetHandler.COPY_COLUMNS);
+        return transactionTemplate.execute(status -> jdbcTemplate.execute((ConnectionCallback<VoterSheetHandler>) connection -> {
+            VoterCopyWriter writer = new VoterCopyWriter(connection.unwrap(PGConnection.class).getCopyAPI().copyIn(copyStatement));
+            VoterSheetHandler rows = new VoterSheetHandler(datasetId, textColumns, writer, appProperties, importedAt);
+            try {
+                streamXlsx(file, rows);
+                long loaded = writer.finish();
+                if (loaded != rows.importedRows()) {
+                    throw new IllegalStateException("COPY loaded " + loaded + " rows but " + rows.importedRows() + " were sent");
+                }
+                return rows;
+            } catch (RuntimeException | SQLException e) {
+                writer.cancel();
+                throw e;
+            } catch (Exception e) {
+                writer.cancel();
+                throw new IllegalStateException("The workbook could not be read", e);
+            }
+        }));
     }
 
     private void streamXlsx(Path file, VoterSheetHandler rows) throws Exception {
@@ -237,7 +270,6 @@ public class DatasetImportServiceImpl implements DatasetImportService {
                     parser.parse(new InputSource(sheet));
                 }
             }
-            rows.finish();
         }
     }
 

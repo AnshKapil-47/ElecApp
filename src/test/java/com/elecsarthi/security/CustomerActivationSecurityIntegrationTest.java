@@ -2,10 +2,14 @@ package com.elecsarthi.security;
 
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.CustomerActivateRequest;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.enums.ActivationStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuthService;
 import org.junit.jupiter.api.DisplayName;
@@ -14,8 +18,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 

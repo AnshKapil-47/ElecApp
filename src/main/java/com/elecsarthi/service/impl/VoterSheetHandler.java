@@ -1,17 +1,16 @@
 package com.elecsarthi.service.impl;
 
+import java.util.Locale;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.entity.ImportIssue;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.CriteriaNormalizer;
 import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler;
 import org.apache.poi.xssf.usermodel.XSSFComment;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -20,14 +19,13 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Receives the rows of one XLSX workbook from the POI SAX parser, normalizes them and inserts them in batches
- * into the dataset's partition table. Nothing but the current row and the current batch is held in memory.
- * The first row of every sheet is the header; unknown header columns are ignored.
+ * Receives the rows of one XLSX workbook from the POI SAX parser, normalizes them and streams them, one row at a
+ * time, into the COPY of the dataset's partition table. Only the current row (and the writer's small buffer) is
+ * held in memory. The first row of every sheet is the header; unknown header columns are ignored.
  */
 class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
 
     private static final int MAX_ISSUES = 200;
-    private static final int BATCH_SIZE = 1000;
 
     /** Insert order of the voter columns that come straight from the sheet. */
     private static final List<String> VOTER_COLUMNS = List.of(
@@ -53,25 +51,31 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
             "nagar_parishad_ward_no", "zilla_parishad_name_ward_no",
             "panchayat_samiti_name_ward_no", "panchayat_no");
 
+    /** The COPY column list; {@link #buildRow} produces the values in exactly this order. */
+    static final List<String> COPY_COLUMNS;
+
     private static final Set<String> SHEET_COLUMNS;
 
     static {
         Set<String> columns = new HashSet<>(VOTER_COLUMNS);
         columns.add("mobile_no");
         SHEET_COLUMNS = Set.copyOf(columns);
+
+        List<String> copyColumns = new ArrayList<>(List.of("dataset_id", "source_record_key_hash"));
+        copyColumns.addAll(VOTER_COLUMNS);
+        copyColumns.addAll(List.of("mobile_no_enc", "mobile_key_version", "voter_image_ref"));
+        COPY_COLUMNS = List.copyOf(copyColumns);
     }
 
     private final Long datasetId;
     private final Set<String> normalizedTextColumns;
-    private final JdbcTemplate jdbcTemplate;
+    private final VoterCopyWriter writer;
     private final AppProperties.SecurityProperties security;
     private final byte[] mobileAesKey;
     private final Instant importedAt;
-    private final String insertSql;
 
     private final Map<Integer, String> headerMap = new HashMap<>();
     private final Map<String, String> currentRow = new HashMap<>();
-    private final List<Object[]> batch = new ArrayList<>();
     private final Set<String> states = new HashSet<>();
     private final List<ImportIssue> issues = new ArrayList<>();
     private int currentRowNum = -1;
@@ -80,18 +84,14 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
     private int importedRows;
     private int failedRows;
 
-    VoterSheetHandler(Long datasetId, Set<String> normalizedTextColumns, JdbcTemplate jdbcTemplate,
+    VoterSheetHandler(Long datasetId, Set<String> normalizedTextColumns, VoterCopyWriter writer,
                       AppProperties appProperties, Instant importedAt) {
         this.datasetId = datasetId;
         this.normalizedTextColumns = normalizedTextColumns;
-        this.jdbcTemplate = jdbcTemplate;
+        this.writer = writer;
         this.security = appProperties.getSecurity();
         this.mobileAesKey = HexFormat.of().parseHex(security.getVoterMobileAesKeyHex());
         this.importedAt = importedAt;
-        this.insertSql = "INSERT INTO voter_d" + datasetId + " (dataset_id, source_record_key_hash, "
-                + String.join(", ", VOTER_COLUMNS)
-                + ", mobile_no_enc, mobile_key_version, voter_image_ref) VALUES ("
-                + String.join(",", Collections.nCopies(VOTER_COLUMNS.size() + 5, "?")) + ")";
     }
 
     int totalRows() {
@@ -121,11 +121,6 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
         currentRowNum = -1;
     }
 
-    /** Writes the last partial batch; call once after all sheets are parsed. */
-    void finish() {
-        flushBatch();
-    }
-
     @Override
     public void startRow(int rowNum) {
         currentRowNum = rowNum;
@@ -140,7 +135,7 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
         String value = formattedValue.trim();
         int columnIndex = columnIndex(cellReference);
         if (currentRowNum == 0) {
-            String column = value.toLowerCase().replace(" ", "_");
+            String column = value.toLowerCase(Locale.ROOT).replace(" ", "_");
             if (SHEET_COLUMNS.contains(column)) {
                 headerMap.put(columnIndex, column);
             }
@@ -172,14 +167,11 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
         }
         states.add(state);
 
-        batch.add(buildRow(rowNum, state, voterId, serialNo));
+        writer.writeRow(buildRow(rowNum, state, voterId, serialNo));
         importedRows++;
-        if (batch.size() >= BATCH_SIZE) {
-            flushBatch();
-        }
     }
 
-    private Object[] buildRow(int rowNum, String state, String voterId, String serialNo) {
+    private List<Object> buildRow(int rowNum, String state, String voterId, String serialNo) {
         // The record key identifies a voter across datasets; the overlap probe compares these hashes.
         String sourceKeyHash = CryptoUtils.sha256Hex(String.join("|",
                 state,
@@ -212,15 +204,7 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
         values.add(mobileEnc);
         values.add(mobileKeyVersion);
         values.add(null); // voter_image_ref is never imported from the sheet
-        return values.toArray();
-    }
-
-    private void flushBatch() {
-        if (batch.isEmpty()) {
-            return;
-        }
-        jdbcTemplate.batchUpdate(insertSql, batch);
-        batch.clear();
+        return values;
     }
 
     private void addIssue(int rowNum, String column, String code, String detail) {

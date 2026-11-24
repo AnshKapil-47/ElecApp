@@ -1,5 +1,6 @@
 package com.elecsarthi.security.authorization;
 
+import java.util.Locale;
 import com.elecsarthi.entity.BoothAssignment;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.ElectionTypeField;
@@ -15,7 +16,11 @@ import org.springframework.stereotype.Component;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Component
@@ -85,10 +90,10 @@ public class VoterScopeAuthorizer {
         List<ElectionTypeField> filterFields = fieldRepository.findByElectionTypeIdAndUsageOrderByFilterOrderAsc(
                 electionType.getId(), FieldUsage.FILTER);
         Set<String> allowedFilterColumns = filterFields.stream()
-                .map(f -> f.getSourceColumn().toLowerCase())
+                .map(f -> f.getSourceColumn().toLowerCase(Locale.ROOT))
                 .collect(Collectors.toSet());
         if (electionType.getGuardColumn() != null) {
-            allowedFilterColumns.add(electionType.getGuardColumn().toLowerCase());
+            allowedFilterColumns.add(electionType.getGuardColumn().toLowerCase(Locale.ROOT));
         }
 
         // Sort keys for deterministic parameter ordering
@@ -96,7 +101,7 @@ public class VoterScopeAuthorizer {
         Collections.sort(sortedKeys);
 
         for (String key : sortedKeys) {
-            String col = key.trim().toLowerCase();
+            String col = key.trim().toLowerCase(Locale.ROOT);
             if (!allowedFilterColumns.contains(col)) {
                 throw new ForbiddenException("Criteria contains unapproved filter column: " + col);
             }

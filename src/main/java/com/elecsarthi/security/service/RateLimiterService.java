@@ -1,5 +1,8 @@
 package com.elecsarthi.security.service;
 
+import java.util.Locale;
+import java.time.Clock;
+import lombok.RequiredArgsConstructor;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import org.springframework.http.HttpStatus;
@@ -10,9 +13,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
+@RequiredArgsConstructor
 public class RateLimiterService {
 
     private final Map<String, WindowCounter> counters = new ConcurrentHashMap<>();
+    private final Clock clock;
 
     private record WindowCounter(long windowMinute, AtomicInteger count) {}
 
@@ -21,8 +26,8 @@ public class RateLimiterService {
             return;
         }
 
-        long currentMinute = System.currentTimeMillis() / 60000;
-        String bucketKey = action + ":" + identifier.trim().toLowerCase() + ":" + currentMinute;
+        long currentMinute = clock.millis() / 60000;
+        String bucketKey = action + ":" + identifier.trim().toLowerCase(Locale.ROOT) + ":" + currentMinute;
 
         WindowCounter counter = counters.compute(bucketKey, (k, existing) -> {
             if (existing == null) {

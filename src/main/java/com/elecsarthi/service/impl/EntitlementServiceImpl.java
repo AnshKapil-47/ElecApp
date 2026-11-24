@@ -3,13 +3,25 @@ package com.elecsarthi.service.impl;
 import java.time.Clock;
 import com.elecsarthi.dto.request.DirectEntitlementRequest;
 import com.elecsarthi.dto.response.EntitlementResponse;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.Dataset;
+import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.Entitlement;
+import com.elecsarthi.enums.AuditOutcome;
+import com.elecsarthi.enums.DatasetTier;
+import com.elecsarthi.enums.EntitlementSource;
+import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ForbiddenException;
+import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
+import com.elecsarthi.repository.ElectionTypeRepository;
+import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.repository.OfflineLeaseRepository;
 import com.elecsarthi.service.AreaResolver;
 import com.elecsarthi.service.AuditService;
@@ -25,7 +37,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -35,6 +48,7 @@ public class EntitlementServiceImpl implements EntitlementService {
 
     private final EntitlementRepository entitlementRepository;
     private final CustomerAccountRepository customerAccountRepository;
+    private final AppUserRepository userRepository;
     private final ElectionTypeRepository electionTypeRepository;
     private final OfflineLeaseRepository offlineLeaseRepository;
     private final AreaResolver areaResolver;
@@ -102,10 +116,10 @@ public class EntitlementServiceImpl implements EntitlementService {
             datasetService.recomputeLongTermRetention(dataset.getId(), now);
         }
 
-        auditService.log(callerUserId, customer.getId(), entitlement.getDatasetId(), null,
+        auditService.logDetails(callerUserId, customer.getId(), entitlement.getDatasetId(), null,
                 "DIRECT_ENTITLEMENT_CREATED", AuditOutcome.SUCCESS,
                 "entitlement", entitlement.getId().toString(),
-                "{\"scopeLabel\":\"" + entitlement.getScopeLabel() + "\"}", null);
+                AuditService.details("scopeLabel", entitlement.getScopeLabel()), null);
 
         return mapToResponse(entitlement, electionType);
     }
@@ -116,7 +130,7 @@ public class EntitlementServiceImpl implements EntitlementService {
         Entitlement entitlement = entitlementRepository.requireById(entitlementId);
 
         entitlement.setMobileAccess(enabled);
-        entitlement.setMobileAccessChangedAt(Instant.now());
+        entitlement.setMobileAccessChangedAt(clock.instant());
         entitlement.setMobileAccessChangedBy(ownerUserId);
         entitlement = entitlementRepository.save(entitlement);
 
@@ -126,10 +140,10 @@ public class EntitlementServiceImpl implements EntitlementService {
             customerAccountRepository.save(ca);
         });
 
-        auditService.log(ownerUserId, entitlement.getCustomerAccountId(), entitlement.getDatasetId(), null,
+        auditService.logDetails(ownerUserId, entitlement.getCustomerAccountId(), entitlement.getDatasetId(), null,
                 "ENTITLEMENT_MOBILE_ACCESS_UPDATED", AuditOutcome.SUCCESS,
                 "entitlement", entitlement.getId().toString(),
-                "{\"mobileAccess\":" + enabled + "}", null);
+                AuditService.details("mobileAccess", enabled), null);
 
         ElectionType electionType = electionTypeRepository.findById(entitlement.getElectionTypeId()).orElse(null);
         return mapToResponse(entitlement, electionType);
@@ -138,17 +152,11 @@ public class EntitlementServiceImpl implements EntitlementService {
     @Override
     @Transactional(readOnly = true)
     public List<EntitlementResponse> getEntitlementsByCustomer(Long callerUserId, Role callerRole, Long customerAccountId) {
-        CustomerAccount customer = customerAccountRepository.requireById(customerAccountId);
-
         if (callerRole == Role.SUBUSER) {
             throw new ForbiddenException("Subusers cannot view customer entitlements");
         }
-
-        if (callerRole == Role.AGENT) {
-            if (!customer.isOwnedByAgent(callerUserId)) {
-                throw new ForbiddenException("You are not the owning agent for this customer");
-            }
-        }
+        CustomerAccount customer = customerAccountRepository.requireById(customerAccountId);
+        requireVisibleToCaller(customer, callerUserId, callerRole);
 
         Map<Short, ElectionType> typeMap = electionTypeRepository.findAll().stream()
                 .collect(Collectors.toMap(ElectionType::getId, et -> et));
@@ -172,17 +180,16 @@ public class EntitlementServiceImpl implements EntitlementService {
     @Override
     @Transactional(readOnly = true)
     public EntitlementResponse getEntitlementById(Long callerUserId, Role callerRole, Long entitlementId) {
-        Entitlement entitlement = entitlementRepository.requireById(entitlementId);
-
         if (callerRole == Role.SUBUSER) {
             throw new ForbiddenException("Subusers cannot view entitlements");
         }
-
-        if (callerRole == Role.AGENT) {
-            CustomerAccount customer = customerAccountRepository.requireById(entitlement.getCustomerAccountId());
-            if (!customer.isOwnedByAgent(callerUserId)) {
-                throw new ForbiddenException("Access denied");
-            }
+        Entitlement entitlement = entitlementRepository.requireById(entitlementId);
+        CustomerAccount customer = customerAccountRepository.requireById(entitlement.getCustomerAccountId());
+        // Same answer as for a missing entitlement, so another tenant's entitlement ids reveal nothing.
+        try {
+            requireVisibleToCaller(customer, callerUserId, callerRole);
+        } catch (ResourceNotFoundException outsideScope) {
+            throw new ResourceNotFoundException("Entitlement not found");
         }
 
         ElectionType electionType = electionTypeRepository.findById(entitlement.getElectionTypeId()).orElse(null);
@@ -221,13 +228,31 @@ public class EntitlementServiceImpl implements EntitlementService {
             customerAccountRepository.save(ca);
         });
 
-        auditService.log(callerUserId, entitlement.getCustomerAccountId(), entitlement.getDatasetId(), null,
+        auditService.logDetails(callerUserId, entitlement.getCustomerAccountId(), entitlement.getDatasetId(), null,
                 "DIRECT_ENTITLEMENT_REVOKED", AuditOutcome.SUCCESS,
                 "entitlement", entitlement.getId().toString(),
-                "{\"reason\":\"" + entitlement.getRevokeReason() + "\"}", null);
+                AuditService.details("reason", entitlement.getRevokeReason()), null);
 
         ElectionType electionType = electionTypeRepository.findById(entitlement.getElectionTypeId()).orElse(null);
         return mapToResponse(entitlement, electionType);
+    }
+
+    /**
+     * OWNER and SUBOWNER see every Customer; an AGENT only the Customers they own; a CUSTOMER only their own
+     * account. Anything else is reported as not found. The caller's account comes from the database user row.
+     */
+    private void requireVisibleToCaller(CustomerAccount customer, Long callerUserId, Role callerRole) {
+        boolean visible = switch (callerRole) {
+            case OWNER, SUBOWNER -> true;
+            case AGENT -> customer.isOwnedByAgent(callerUserId);
+            case CUSTOMER -> userRepository.findById(callerUserId)
+                    .map(caller -> customer.getId().equals(caller.getCustomerAccountId()))
+                    .orElse(false);
+            case SUBUSER -> false;
+        };
+        if (!visible) {
+            throw new ResourceNotFoundException("Customer account not found");
+        }
     }
 
     private EntitlementResponse mapToResponse(Entitlement e, ElectionType electionType) {

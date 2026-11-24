@@ -1,7 +1,17 @@
 package com.elecsarthi.entity;
 
-import jakarta.persistence.*;
-import lombok.*;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
+import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -13,11 +23,27 @@ import java.util.UUID;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class OfflineLease {
+public class OfflineLease implements org.springframework.data.domain.Persistable<UUID> {
 
+    /** Assigned before the lease is signed, because the signed payload names the lease. */
     @Id
-    @GeneratedValue(strategy = GenerationType.AUTO)
-    private UUID id;
+    @Builder.Default
+    private UUID id = UUID.randomUUID();
+
+    @Transient
+    @Builder.Default
+    private boolean isNewRecord = true;
+
+    @Override
+    public boolean isNew() {
+        return isNewRecord;
+    }
+
+    @PostLoad
+    @PostPersist
+    void markNotNew() {
+        this.isNewRecord = false;
+    }
 
     @Column(name = "booth_assignment_id", nullable = false)
     private Long boothAssignmentId;

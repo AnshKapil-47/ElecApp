@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.time.Clock;
 import com.elecsarthi.dto.request.MarkTurnoutRequest;
 import com.elecsarthi.dto.request.ResetTurnoutRequest;
 import com.elecsarthi.dto.request.UnmarkTurnoutRequest;
@@ -26,7 +27,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 
 @Slf4j
 @Service
@@ -37,6 +39,7 @@ public class TurnoutServiceImpl implements TurnoutService {
     private final ElectionTypeRepository electionTypeRepository;
     private final VoterScopeAuthorizer voterScopeAuthorizer;
     private final JdbcTemplate jdbcTemplate;
+    private final Clock clock;
 
     @Override
     @Transactional
@@ -61,7 +64,7 @@ public class TurnoutServiceImpl implements TurnoutService {
             throw new ResourceNotFoundException("Voter not found in entitlement area or assigned booth: " + request.getVoterRowId());
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         String insertSql = "INSERT INTO voter_turnout (dataset_id, customer_account_id, voter_row_id, marked_by_user_id, marked_at, source) " +
                 "VALUES (?, ?, ?, ?, clock_timestamp(), 'ONLINE') " +
                 "ON CONFLICT (dataset_id, customer_account_id, voter_row_id) DO NOTHING";
@@ -247,14 +250,14 @@ public class TurnoutServiceImpl implements TurnoutService {
                 .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found: " + entitlementId));
 
         if (!ent.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ForbiddenException("Entitlement does not belong to your customer account");
+            throw new ResourceNotFoundException("Entitlement not found: " + entitlementId);
         }
 
         if (ent.getStatus() != EntitlementStatus.ACTIVE) {
             throw new ForbiddenException("Entitlement is not active");
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
             throw new ForbiddenException("Entitlement is expired or not yet valid");
         }

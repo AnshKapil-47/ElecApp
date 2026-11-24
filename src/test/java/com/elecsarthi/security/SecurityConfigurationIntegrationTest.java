@@ -1,16 +1,11 @@
 package com.elecsarthi.security;
 
 import com.elecsarthi.config.AppProperties;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
-import com.elecsarthi.repository.*;
 import com.elecsarthi.security.config.SecurityConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 import java.util.List;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Production start-up validation of secrets and CORS. */

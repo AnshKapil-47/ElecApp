@@ -1,14 +1,48 @@
 package com.elecsarthi.subuser;
 
 import com.elecsarthi.config.AppProperties;
-import com.elecsarthi.dto.request.*;
-import com.elecsarthi.dto.response.*;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.dto.request.CreateBoothAssignmentRequest;
+import com.elecsarthi.dto.request.CreateSubuserRequest;
+import com.elecsarthi.dto.request.OfflineTurnoutMarkDto;
+import com.elecsarthi.dto.request.OfflineWritebackRequest;
+import com.elecsarthi.dto.request.RequestOfflineLeaseRequest;
+import com.elecsarthi.dto.request.RevokeBoothAssignmentRequest;
+import com.elecsarthi.dto.request.StartSyncSessionRequest;
+import com.elecsarthi.dto.response.BoothAssignmentResponse;
+import com.elecsarthi.dto.response.OfflineLeaseResponse;
+import com.elecsarthi.dto.response.OfflineWritebackResponse;
+import com.elecsarthi.dto.response.SubuserDetailResponse;
+import com.elecsarthi.dto.response.SyncChunkResponse;
+import com.elecsarthi.dto.response.SyncSessionResponse;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.Dataset;
+import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.Entitlement;
+import com.elecsarthi.entity.UserDevice;
+import com.elecsarthi.enums.ActivationStatus;
+import com.elecsarthi.enums.BoothAssignmentStatus;
+import com.elecsarthi.enums.DatasetStatus;
+import com.elecsarthi.enums.DatasetTier;
+import com.elecsarthi.enums.DevicePlatform;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.ElectionTypeCode;
+import com.elecsarthi.enums.EntitlementSource;
+import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.SyncStatus;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.BoothAssignmentRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
+import com.elecsarthi.repository.DatasetRepository;
+import com.elecsarthi.repository.ElectionTypeRepository;
+import com.elecsarthi.repository.EntitlementRepository;
+import com.elecsarthi.repository.UserDeviceRepository;
+import com.elecsarthi.repository.VoterTurnoutRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.OfflineLeaseService;
 import com.elecsarthi.service.SubuserService;
@@ -28,7 +62,9 @@ import org.springframework.test.context.ActiveProfiles;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -302,28 +338,38 @@ public class SubuserServiceIntegrationTest {
         assertEquals(BoothAssignmentStatus.ACTIVE, baNew1.getStatus());
     }
 
-    @Test
-    @DisplayName("Offline Booth Lease: Ed25519 signature verification, max 24h expiry, and writeback validation")
-    void testOfflineLeaseAndWriteback() {
+    /** A Subuser of customer1 with an ACTIVE device and one 3-day assignment of booth 10 (slot 1). */
+    private record LeaseFixture(SubuserDetailResponse subuser, UserDevice device, BoothAssignmentResponse assignment) {
+    }
+
+    private LeaseFixture leaseFixture(String username, String installationId) {
         SubuserDetailResponse subuser = subuserService.createSubuser(
                 customerUser1.getId(), Role.CUSTOMER, customer1.getId(),
-                CreateSubuserRequest.builder().username("subuser_gamma").fullName("Worker Gamma").password("Pass12345!").build());
-
-        UserDevice subuserDevice = userDeviceRepository.save(UserDevice.builder()
+                CreateSubuserRequest.builder().username(username).fullName("Worker " + username).password("Pass12345!").build());
+        UserDevice device = userDeviceRepository.save(UserDevice.builder()
                 .userId(subuser.getId())
                 .userRole(Role.SUBUSER)
                 .customerAccountId(customer1.getId())
-                .installationId("inst-subuser-001")
+                .installationId(installationId)
                 .platform(DevicePlatform.ANDROID)
                 .deviceName("Samsung Galaxy")
                 .status(DeviceStatus.ACTIVE)
-                .publicKey("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEsubuserpubkey")
+                .publicKey("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE" + installationId)
                 .keyAlgorithm("ECDSA_P256")
                 .build());
-
-        BoothAssignmentResponse ba = subuserService.assignBooth(
+        BoothAssignmentResponse assignment = subuserService.assignBooth(
                 customerUser1.getId(), Role.CUSTOMER, customer1.getId(), subuser.getId(),
                 CreateBoothAssignmentRequest.builder().entitlementId(entitlement.getId()).boothValue(10).slot((short) 1).durationDays(3).build());
+        return new LeaseFixture(subuser, device, assignment);
+    }
+
+    @Test
+    @DisplayName("Offline Booth Lease: Ed25519 signature verification, max 24h expiry, and writeback validation")
+    void testOfflineLeaseAndWriteback() {
+        LeaseFixture fixture = leaseFixture("subuser_gamma", "inst-subuser-001");
+        SubuserDetailResponse subuser = fixture.subuser();
+        UserDevice subuserDevice = fixture.device();
+        BoothAssignmentResponse ba = fixture.assignment();
 
         // 1. Subuser requests offline lease
         OfflineLeaseResponse leaseResp = offlineLeaseService.requestLease(
@@ -373,6 +419,98 @@ public class SubuserServiceIntegrationTest {
         // Verify voter 1 marked in DB with source OFFLINE_LEASE
         assertTrue(voterTurnoutRepository.existsByDatasetIdAndCustomerAccountIdAndVoterRowId(
                 dataset.getId(), customer1.getId(), voter1Id));
+    }
+
+    @Test
+    @DisplayName("Offline Lease Privacy: signed payload and response name the lease, never the dataset, and writeback still works")
+    void testLeasePayloadAndResponseExposeNoDatasetInternals() throws Exception {
+        LeaseFixture fixture = leaseFixture("subuser_privacy", "inst-subuser-privacy");
+        SubuserDetailResponse subuser = fixture.subuser();
+        UserDevice subuserDevice = fixture.device();
+        BoothAssignmentResponse ba = fixture.assignment();
+
+        OfflineLeaseResponse lease = offlineLeaseService.requestLease(
+                subuser.getId(), Role.SUBUSER, subuserDevice.getId(),
+                RequestOfflineLeaseRequest.builder().boothAssignmentId(ba.getId()).build());
+
+        com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        com.fasterxml.jackson.databind.JsonNode payload = json.readTree(lease.getPayloadJson());
+        assertEquals(2, payload.get("payloadVersion").asInt());
+        assertEquals(lease.getLeaseId().toString(), payload.get("leaseId").asText());
+        assertEquals(entitlement.getId(), payload.get("entitlementId").asLong());
+        assertFalse(lease.getPayloadJson().toLowerCase().contains("dataset"), "Signed payload must not mention a dataset");
+        assertFalse(json.writeValueAsString(lease).toLowerCase().contains("dataset"), "Lease response must not mention a dataset");
+
+        String storedHash = jdbcTemplate.queryForObject(
+                "SELECT payload_sha256 FROM offline_lease WHERE id = ?::uuid", String.class, lease.getLeaseId().toString());
+        assertEquals(CryptoUtils.sha256Hex(lease.getPayloadJson()), storedHash);
+
+        Instant markedAt = lease.getIssuedAt().plus(1, ChronoUnit.HOURS);
+        OfflineWritebackResponse writeback = offlineLeaseService.processWriteback(
+                subuser.getId(), Role.SUBUSER, subuserDevice.getId(),
+                OfflineWritebackRequest.builder()
+                        .leaseId(lease.getLeaseId())
+                        .marks(List.of(OfflineTurnoutMarkDto.builder().voterRowId(voter1Id).offlineMarkedAt(markedAt).build()))
+                        .build());
+        assertEquals(1, writeback.getTotalAccepted(), "The dataset is resolved from the lease record on the server");
+        assertTrue(voterTurnoutRepository.existsByDatasetIdAndCustomerAccountIdAndVoterRowId(
+                dataset.getId(), customer1.getId(), voter1Id));
+    }
+
+    @Test
+    @DisplayName("Offline Lease Timestamp Boundary: Enforce strict interval issuedAt <= offlineMarkedAt < expiresAt")
+    void testOfflineLeaseStrictTimestampBoundaries() {
+        LeaseFixture fixture = leaseFixture("subuser_bounds", "inst-subuser-bounds");
+        SubuserDetailResponse subuser = fixture.subuser();
+        UserDevice subuserDevice = fixture.device();
+        BoothAssignmentResponse ba = fixture.assignment();
+
+        OfflineLeaseResponse leaseResp = offlineLeaseService.requestLease(
+                subuser.getId(), Role.SUBUSER, subuserDevice.getId(),
+                RequestOfflineLeaseRequest.builder().boothAssignmentId(ba.getId()).build());
+
+        Long vBeforeIssued = jdbcTemplate.queryForObject(
+                "INSERT INTO voter (dataset_id, serial_no, voter_id, state, ac_no, part_no, v_fname_en, v_lname_en, mobile_no_enc, source_record_key_hash) " +
+                "VALUES (?, 101, 'EPIC_B1', 'RAJASTHAN', 12, 10, 'A', 'B', 'e1', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1') RETURNING id",
+                Long.class, dataset.getId());
+        Long vAtIssued = jdbcTemplate.queryForObject(
+                "INSERT INTO voter (dataset_id, serial_no, voter_id, state, ac_no, part_no, v_fname_en, v_lname_en, mobile_no_enc, source_record_key_hash) " +
+                "VALUES (?, 102, 'EPIC_B2', 'RAJASTHAN', 12, 10, 'C', 'D', 'e2', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2') RETURNING id",
+                Long.class, dataset.getId());
+        Long vAtExpiry = jdbcTemplate.queryForObject(
+                "INSERT INTO voter (dataset_id, serial_no, voter_id, state, ac_no, part_no, v_fname_en, v_lname_en, mobile_no_enc, source_record_key_hash) " +
+                "VALUES (?, 103, 'EPIC_B3', 'RAJASTHAN', 12, 10, 'E', 'F', 'e3', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3') RETURNING id",
+                Long.class, dataset.getId());
+        Long vAfterExpiry = jdbcTemplate.queryForObject(
+                "INSERT INTO voter (dataset_id, serial_no, voter_id, state, ac_no, part_no, v_fname_en, v_lname_en, mobile_no_enc, source_record_key_hash) " +
+                "VALUES (?, 104, 'EPIC_B4', 'RAJASTHAN', 12, 10, 'G', 'H', 'e4', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4') RETURNING id",
+                Long.class, dataset.getId());
+
+        OfflineWritebackRequest writebackReq = OfflineWritebackRequest.builder()
+                .leaseId(leaseResp.getLeaseId())
+                .marks(List.of(
+                        // Before issuance -> REJECTED
+                        OfflineTurnoutMarkDto.builder().voterRowId(vBeforeIssued).offlineMarkedAt(leaseResp.getIssuedAt().minusMillis(1)).build(),
+                        // Exact issuance timestamp -> ACCEPTED (issuedAt <= offlineMarkedAt)
+                        OfflineTurnoutMarkDto.builder().voterRowId(vAtIssued).offlineMarkedAt(leaseResp.getIssuedAt()).build(),
+                        // Exact expiration timestamp -> REJECTED (strictly < expiresAt)
+                        OfflineTurnoutMarkDto.builder().voterRowId(vAtExpiry).offlineMarkedAt(leaseResp.getExpiresAt()).build(),
+                        // After expiration -> REJECTED
+                        OfflineTurnoutMarkDto.builder().voterRowId(vAfterExpiry).offlineMarkedAt(leaseResp.getExpiresAt().plusMillis(1)).build()
+                ))
+                .build();
+
+        OfflineWritebackResponse wbResp = offlineLeaseService.processWriteback(
+                subuser.getId(), Role.SUBUSER, subuserDevice.getId(), writebackReq);
+
+        assertEquals(4, wbResp.getTotalSubmitted());
+        assertEquals(1, wbResp.getTotalAccepted(), "Only timestamp at/after issuedAt and strictly before expiresAt must be accepted");
+        assertEquals(3, wbResp.getTotalRejected(), "Before issuance, exact expiry, and after expiry must all be rejected");
+
+        assertFalse(voterTurnoutRepository.existsByDatasetIdAndCustomerAccountIdAndVoterRowId(dataset.getId(), customer1.getId(), vBeforeIssued));
+        assertTrue(voterTurnoutRepository.existsByDatasetIdAndCustomerAccountIdAndVoterRowId(dataset.getId(), customer1.getId(), vAtIssued));
+        assertFalse(voterTurnoutRepository.existsByDatasetIdAndCustomerAccountIdAndVoterRowId(dataset.getId(), customer1.getId(), vAtExpiry));
+        assertFalse(voterTurnoutRepository.existsByDatasetIdAndCustomerAccountIdAndVoterRowId(dataset.getId(), customer1.getId(), vAfterExpiry));
     }
 
     @Test

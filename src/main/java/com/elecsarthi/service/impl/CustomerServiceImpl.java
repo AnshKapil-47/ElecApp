@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.util.Locale;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.ProvisionCustomerRequest;
 import com.elecsarthi.dto.response.CustomerDetailResponse;
@@ -91,7 +92,7 @@ public class CustomerServiceImpl implements CustomerService {
                 .customerName(request.getCustomerName().trim())
                 .partyOrOrgName(request.getPartyOrOrgName() != null ? request.getPartyOrOrgName().trim() : null)
                 .contactPhone(phone)
-                .contactEmail(request.getContactEmail() != null ? request.getContactEmail().trim().toLowerCase() : null)
+                .contactEmail(request.getContactEmail() != null ? request.getContactEmail().trim().toLowerCase(Locale.ROOT) : null)
                 .status(UserStatus.ACTIVE)
                 .activationStatus(ActivationStatus.PENDING)
                 .activationCodeHash(codeHash)
@@ -122,8 +123,8 @@ public class CustomerServiceImpl implements CustomerService {
 
         userRepository.save(customerUser);
 
-        auditService.log(callerUserId, customer.getId(), null, null, "CUSTOMER_PROVISION", AuditOutcome.SUCCESS,
-                "customer_account", customer.getId().toString(), "{\"phone\":\"" + phone + "\"}", null);
+        auditService.logDetails(callerUserId, customer.getId(), null, null, "CUSTOMER_PROVISION", AuditOutcome.SUCCESS,
+                "customer_account", customer.getId().toString(), AuditService.details("phone", phone), null);
 
         return CustomerProvisionResponse.builder()
                 .id(customer.getId())
@@ -206,8 +207,8 @@ public class CustomerServiceImpl implements CustomerService {
                 "WHERE booth_assignment_id IN (SELECT id FROM booth_assignment WHERE customer_account_id = ?) AND revoked_at IS NULL",
                 java.sql.Timestamp.from(now), callerUserId, customerId);
 
-        auditService.log(callerUserId, customer.getId(), null, null, "CUSTOMER_SUSPEND", AuditOutcome.SUCCESS,
-                "customer_account", customer.getId().toString(), "{\"reason\":\"" + reason + "\"}", null);
+        auditService.logDetails(callerUserId, customer.getId(), null, null, "CUSTOMER_SUSPEND", AuditOutcome.SUCCESS,
+                "customer_account", customer.getId().toString(), AuditService.details("reason", reason), null);
     }
 
     @Override
@@ -249,8 +250,8 @@ public class CustomerServiceImpl implements CustomerService {
         customer.setOwningAgentUserId(newAgent.getId());
         customerAccountRepository.save(customer);
 
-        auditService.log(callerUserId, customer.getId(), null, null, "CUSTOMER_AGENT_REASSIGN", AuditOutcome.SUCCESS,
-                "customer_account", customer.getId().toString(), "{\"oldAgentId\":" + oldAgentId + ",\"newAgentId\":" + newAgentId + "}", null);
+        auditService.logDetails(callerUserId, customer.getId(), null, null, "CUSTOMER_AGENT_REASSIGN", AuditOutcome.SUCCESS,
+                "customer_account", customer.getId().toString(), AuditService.details("oldAgentId", oldAgentId, "newAgentId", newAgentId), null);
     }
 
     @Override
@@ -277,11 +278,17 @@ public class CustomerServiceImpl implements CustomerService {
         CustomerAccount customer = customerAccountRepository.findById(customerId)
                 .orElseThrow(() -> new ResourceNotFoundException("Customer not found."));
 
-        if (callerRole == Role.AGENT) {
-            if (!customer.isOwnedByAgent(callerUserId)) {
-                // Return 404 so existence is not leaked to unauthorized agents
-                throw new ResourceNotFoundException("Customer not found.");
-            }
+        // Outside the caller's scope the answer is 404, so the existence of other tenants' Customers is not revealed.
+        boolean visible = switch (callerRole) {
+            case OWNER, SUBOWNER -> true;
+            case AGENT -> customer.isOwnedByAgent(callerUserId);
+            case CUSTOMER -> userRepository.findById(callerUserId)
+                    .map(caller -> customer.getId().equals(caller.getCustomerAccountId()))
+                    .orElse(false);
+            case SUBUSER -> false;
+        };
+        if (!visible) {
+            throw new ResourceNotFoundException("Customer not found.");
         }
         return customer;
     }

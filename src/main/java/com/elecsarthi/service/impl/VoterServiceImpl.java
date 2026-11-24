@@ -303,7 +303,7 @@ public class VoterServiceImpl implements VoterService {
         Entitlement entitlement = entitlementRepository.findById(entitlementId)
                 .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found: " + entitlementId));
         if (!entitlement.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ForbiddenException("Entitlement does not belong to your customer account");
+            throw new ResourceNotFoundException("Entitlement not found: " + entitlementId);
         }
         if (entitlement.getStatus() != EntitlementStatus.ACTIVE) {
             throw new ForbiddenException("Entitlement is revoked or not active");

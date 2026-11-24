@@ -1,6 +1,9 @@
 package com.elecsarthi.service.impl;
 
-import com.elecsarthi.dto.response.*;
+import com.elecsarthi.dto.response.ElectionTypeQuantityResponse;
+import com.elecsarthi.dto.response.SaleRecordResponse;
+import com.elecsarthi.dto.response.SalesReportResponse;
+import com.elecsarthi.dto.response.ScopeQuantityResponse;
 import com.elecsarthi.entity.AgentSale;
 import com.elecsarthi.entity.AgentSaleLine;
 import com.elecsarthi.entity.CustomerAccount;
@@ -18,7 +21,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Service

@@ -1,5 +1,6 @@
 package com.elecsarthi.security;
 
+import com.elecsarthi.dto.request.DeviceProof;
 import com.elecsarthi.dto.request.CustomerActivateRequest;
 import com.elecsarthi.dto.request.LoginRequest;
 import com.elecsarthi.dto.request.RefreshTokenRequest;
@@ -8,7 +9,13 @@ import com.elecsarthi.dto.response.TokenRefreshResponse;
 import com.elecsarthi.entity.AppUser;
 import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.UserDevice;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.enums.ActivationStatus;
+import com.elecsarthi.enums.ClientType;
+import com.elecsarthi.enums.DevicePlatform;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.SessionStatus;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
@@ -234,9 +241,7 @@ public class AuthServiceIntegrationTest {
         sig1.update(payload1.getBytes(StandardCharsets.UTF_8));
         String sigStr1 = Base64.getEncoder().encodeToString(sig1.sign());
 
-        TokenRefreshResponse refresh1 = authService.refreshToken(
-                new RefreshTokenRequest(originalRefreshToken), "127.0.0.1",
-                device.getId().toString(), sigStr1, String.valueOf(ts), nonce1, String.valueOf(counter1), null);
+        TokenRefreshResponse refresh1 = authService.refreshToken(new RefreshTokenRequest(originalRefreshToken), "127.0.0.1", new DeviceProof(device.getId().toString(), sigStr1, String.valueOf(ts), nonce1, String.valueOf(counter1), null));
         assertNotNull(refresh1.getAccessToken());
         assertNotNull(refresh1.getRefreshToken());
         assertNotEquals(originalRefreshToken, refresh1.getRefreshToken());
@@ -252,8 +257,7 @@ public class AuthServiceIntegrationTest {
 
         final UserDevice dev = device;
         ApiException reuseEx = assertThrows(ApiException.class, () ->
-                authService.refreshToken(new RefreshTokenRequest(originalRefreshToken), "127.0.0.1",
-                        dev.getId().toString(), sigStr2, String.valueOf(ts), nonce2, String.valueOf(counter2), null));
+                authService.refreshToken(new RefreshTokenRequest(originalRefreshToken), "127.0.0.1", new DeviceProof(dev.getId().toString(), sigStr2, String.valueOf(ts), nonce2, String.valueOf(counter2), null)));
         assertEquals(401, reuseEx.getStatus().value());
 
         // 3. Compromised session is now TERMINATED, so even the new refresh token is revoked
@@ -267,8 +271,7 @@ public class AuthServiceIntegrationTest {
         String sigStr3 = Base64.getEncoder().encodeToString(sig3.sign());
 
         ApiException terminatedEx = assertThrows(ApiException.class, () ->
-                authService.refreshToken(new RefreshTokenRequest(refresh1.getRefreshToken()), "127.0.0.1",
-                        dev.getId().toString(), sigStr3, String.valueOf(ts), nonce3, String.valueOf(counter3), null));
+                authService.refreshToken(new RefreshTokenRequest(refresh1.getRefreshToken()), "127.0.0.1", new DeviceProof(dev.getId().toString(), sigStr3, String.valueOf(ts), nonce3, String.valueOf(counter3), null)));
         assertEquals(401, terminatedEx.getStatus().value());
     }
 

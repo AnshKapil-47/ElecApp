@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.time.Clock;
 import com.elecsarthi.entity.AuditLog;
 import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.repository.AuditLogRepository;
@@ -12,7 +13,8 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.time.Instant;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -21,11 +23,13 @@ import java.util.UUID;
 public class AuditServiceImpl implements AuditService {
 
     private final AuditLogRepository auditLogRepository;
+    private final Clock clock;
     private final TransactionTemplate requiresNewTxTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public AuditServiceImpl(AuditLogRepository auditLogRepository, PlatformTransactionManager transactionManager) {
+    public AuditServiceImpl(AuditLogRepository auditLogRepository, PlatformTransactionManager transactionManager, Clock clock) {
         this.auditLogRepository = auditLogRepository;
+        this.clock = clock;
         this.requiresNewTxTemplate = new TransactionTemplate(transactionManager);
         this.requiresNewTxTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -67,7 +71,7 @@ public class AuditServiceImpl implements AuditService {
                 .targetId(targetId)
                 .details(safeDetails)
                 .ipAddress(ipAddress)
-                .createdAt(Instant.now())
+                .createdAt(clock.instant())
                 .build();
 
         // Security requirement: DENIED audit events must survive caller transaction rollback
@@ -93,12 +97,34 @@ public class AuditServiceImpl implements AuditService {
         String detailsJson = null;
         if (detailsMap != null) {
             try {
-                detailsJson = objectMapper.writeValueAsString(detailsMap);
+                detailsJson = objectMapper.writeValueAsString(jsonbSafe(detailsMap));
             } catch (Exception e) {
                 log.warn("Failed to serialize audit details map to JSON", e);
                 detailsJson = "{}";
             }
         }
         log(actorUserId, customerAccountId, datasetId, deviceId, actionType, outcome, targetEntity, targetId, detailsJson, ipAddress);
+    }
+
+    /**
+     * PostgreSQL jsonb cannot store NUL or an unpaired surrogate, and the audit insert would fail (aborting the
+     * business operation for a SUCCESS audit). Client-supplied text containing them is stored with U+FFFD instead.
+     */
+    private static Object jsonbSafe(Object value) {
+        if (value instanceof String text) {
+            return text.codePoints()
+                    .map(cp -> cp == 0 || (cp >= Character.MIN_SURROGATE && cp <= Character.MAX_SURROGATE) ? 0xFFFD : cp)
+                    .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                    .toString();
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> safe = new LinkedHashMap<>();
+            map.forEach((key, entry) -> safe.put((String) jsonbSafe(String.valueOf(key)), jsonbSafe(entry)));
+            return safe;
+        }
+        if (value instanceof Collection<?> items) {
+            return items.stream().map(AuditServiceImpl::jsonbSafe).toList();
+        }
+        return value;
     }
 }

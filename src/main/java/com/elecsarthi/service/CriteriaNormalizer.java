@@ -1,5 +1,8 @@
 package com.elecsarthi.service;
 
+import java.math.BigDecimal;
+import com.elecsarthi.enums.FieldValueType;
+import com.elecsarthi.enums.FieldUsage;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.ElectionTypeField;
 import com.elecsarthi.exception.common.BadRequestException;
@@ -11,7 +14,13 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.text.Normalizer;
-import java.util.*;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 @Component
@@ -21,7 +30,11 @@ public class CriteriaNormalizer {
     private final ElectionTypeFieldRepository fieldRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private static final Pattern WHITESPACE_PATTERN = Pattern.compile("\\s+");
+    /**
+     * Any run of ASCII or Unicode whitespace (including no-break and other Unicode separators, which Excel exports
+     * contain). Zero-width joiners are deliberately not matched: they are meaningful inside Indic scripts.
+     */
+    private static final Pattern WHITESPACE_PATTERN = Pattern.compile("[\\s\\p{Z}]+");
 
     @Getter
     public static class NormalizedCriteria {
@@ -44,7 +57,7 @@ public class CriteriaNormalizer {
         }
 
         List<ElectionTypeField> filterFields = fieldRepository.findByElectionTypeIdAndUsageOrderByFilterOrderAsc(
-                electionType.getId(), com.elecsarthi.enums.FieldUsage.FILTER);
+                electionType.getId(), FieldUsage.FILTER);
 
         Set<String> requiredFilterColumns = new HashSet<>();
         Map<String, ElectionTypeField> fieldMap = new HashMap<>();
@@ -62,7 +75,7 @@ public class CriteriaNormalizer {
         Map<String, Object> normalizedMap = new TreeMap<>(); // sorted lexicographically
 
         for (Map.Entry<String, Object> entry : input.entrySet()) {
-            String colName = entry.getKey().trim().toLowerCase();
+            String colName = entry.getKey().trim().toLowerCase(Locale.ROOT);
             Object rawValue = entry.getValue();
 
             if (rawValue == null) continue;
@@ -73,20 +86,13 @@ public class CriteriaNormalizer {
                 throw new BadRequestException("Field '" + colName + "' is not a valid filter field for election type " + electionType.getCode());
             }
 
-            if (fieldDef.getValueType() == com.elecsarthi.enums.FieldValueType.INT) {
-                long numVal;
-                if (rawValue instanceof Number n) {
-                    numVal = n.longValue();
-                } else {
-                    String str = rawValue.toString().trim();
-                    try {
-                        numVal = Long.parseLong(str);
-                    } catch (NumberFormatException e) {
-                        throw new BadRequestException("Field '" + colName + "' must be an integer.");
-                    }
-                }
+            if (fieldDef.getValueType() == FieldValueType.INT) {
+                long numVal = integerValue(colName, rawValue);
                 if (numVal <= 0) {
                     throw new BadRequestException("Field '" + colName + "' must be a positive integer.");
+                }
+                if (numVal > Integer.MAX_VALUE) {
+                    throw new BadRequestException("Field '" + colName + "' is out of range.");
                 }
                 normalizedMap.put(colName, numVal);
             } else {
@@ -114,14 +120,32 @@ public class CriteriaNormalizer {
         return new NormalizedCriteria(canonicalJson, criteriaHash, normalizedMap, scopeLabel);
     }
 
+    /**
+     * An integer criterion must be exactly an integer: a fractional number such as 12.9 is rejected, never
+     * truncated to 12, because that would silently grant a different area than the one requested.
+     */
+    private static long integerValue(String column, Object raw) {
+        try {
+            if (raw instanceof Number number) {
+                return number instanceof Long || number instanceof Integer || number instanceof Short || number instanceof Byte
+                        ? number.longValue()
+                        : new BigDecimal(number.toString()).longValueExact();
+            }
+            return Long.parseLong(raw.toString().trim());
+        } catch (NumberFormatException | ArithmeticException e) {
+            throw new BadRequestException("Field '" + column + "' must be an integer.");
+        }
+    }
+
+    /**
+     * The single normalization applied to text both when a sheet is imported and when criteria are evaluated, so a
+     * stored value and a requested value compare equal: Unicode NFC, whitespace runs collapsed to one space, ends
+     * trimmed, Latin upper-case.
+     */
     public static String normalizeText(String input) {
         if (input == null) return "";
-        // 1. Unicode NFC normalization
         String nfc = Normalizer.normalize(input, Normalizer.Form.NFC);
-        // 2. Trim and single spaces
-        String collapsed = WHITESPACE_PATTERN.matcher(nfc.trim()).replaceAll(" ");
-        // 3. Latin upper-case
-        return collapsed.toUpperCase(Locale.ROOT);
+        return WHITESPACE_PATTERN.matcher(nfc).replaceAll(" ").trim().toUpperCase(Locale.ROOT);
     }
 
     public static String buildCanonicalJson(Map<String, Object> sortedMap) {

@@ -1,10 +1,16 @@
 package com.elecsarthi.security;
 
 import com.elecsarthi.config.AppProperties;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.UserDevice;
+import com.elecsarthi.enums.DevicePlatform;
+import com.elecsarthi.enums.DeviceStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.security.jwt.JwtTokenProvider;
 import com.elecsarthi.service.DeviceService;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,14 +30,20 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.UUID;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /** Single-use device registration tokens: durability, concurrency and fail-closed behaviour. */
 public class RegistrationTokenSecurityIntegrationTest extends SecurityIntegrationTestSupport {
+
+    @Autowired
+    private java.time.Clock clock;
 
     private MockMvc mockMvc;
 
@@ -232,7 +244,7 @@ public class RegistrationTokenSecurityIntegrationTest extends SecurityIntegratio
                 throw new org.springframework.dao.DataAccessResourceFailureException("Simulated DB outage");
             }
         };
-        JwtTokenProvider freshFailingTokenProvider = new JwtTokenProvider(appProperties, failingJtiJdbc);
+        JwtTokenProvider freshFailingTokenProvider = new JwtTokenProvider(appProperties, failingJtiJdbc, clock);
         String validRandomJti = UUID.randomUUID().toString();
         assertTrue(freshFailingTokenProvider.isRegistrationJtiInvalid(validRandomJti),
                 "Uncached JTI check MUST fail closed (return true) on DB failure");

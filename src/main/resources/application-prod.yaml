@@ -15,8 +15,6 @@ spring:
     multipart:
       max-file-size: 200MB
       max-request-size: 210MB
-  flyway:
-    enabled: false # In production, migrations run via migration pipeline
 
 server:
   port: ${PORT:8080}

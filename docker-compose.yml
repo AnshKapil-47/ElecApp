@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18-bookworm
+    image: postgres:18.3-bookworm
     container_name: elecsarthi-postgres
     restart: unless-stopped
     environment:
@@ -10,7 +10,8 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - es_pgdata:/var/lib/postgresql/data
+      # PostgreSQL 18 images keep data in a versioned subdirectory and require the mount at /var/lib/postgresql.
+      - es_pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-elecsarthi_db}"]
       interval: 10s
@@ -19,15 +20,51 @@ services:
     networks:
       - elecsarthi-net
 
+  # Deployment order: postgres -> migration -> runtime-role -> backend. Each step must finish successfully
+  # (service_completed_successfully) before the next one starts, so a failed migration stops the deployment.
+
   migration:
-    image: flyway/flyway:11-alpine
+    # One-shot. Applies db/migration (V1..Vn) with the privileged bootstrap account, then exits. The backend
+    # never receives these credentials and never runs DDL (prod profile has Flyway disabled).
+    image: flyway/flyway:12.11.0-alpine
     container_name: elecsarthi-flyway
+    restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-elecsarthi_db}
+      FLYWAY_USER: ${POSTGRES_USER:-postgres}
+      FLYWAY_PASSWORD: ${POSTGRES_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CONNECT_RETRIES: "10"
+      FLYWAY_CLEAN_DISABLED: "true"
+      FLYWAY_OUT_OF_ORDER: "false"
     volumes:
-      - ./src/main/resources/db/migration:/flyway/sql:ro
-    command: -url=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-elecsarthi_db} -user=${POSTGRES_USER:-postgres} -password=${POSTGRES_PASSWORD} -connectRetries=10 migrate
+      - ${MIGRATIONS_DIR:-./src/main/resources/db/migration}:/flyway/sql:ro
+    command: migrate
+    networks:
+      - elecsarthi-net
+
+  runtime-role:
+    # One-shot. V2 creates the restricted role 'elecsarthi_app' with a development password that is public in
+    # the repository; this step sets DB_PASSWORD instead and refuses the development value.
+    image: postgres:18.3-bookworm
+    container_name: elecsarthi-runtime-role
+    restart: "no"
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:-elecsarthi_db}
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      RUNTIME_DB_USER: ${DB_USER:-elecsarthi_app}
+      RUNTIME_DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    volumes:
+      - ./docker/db/set-runtime-password.sh:/set-runtime-password.sh:ro
+    entrypoint: ["sh", "/set-runtime-password.sh"]
     networks:
       - elecsarthi-net
 
@@ -40,7 +77,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      migration:
+      runtime-role:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:${SERVER_PORT:-8080}:8080"

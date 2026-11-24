@@ -1,5 +1,6 @@
 package com.elecsarthi.controller;
 
+import com.elecsarthi.dto.request.DeviceProof;
 import com.elecsarthi.dto.request.CustomerActivateRequest;
 import com.elecsarthi.dto.request.LoginRequest;
 import com.elecsarthi.dto.request.RefreshTokenRequest;
@@ -13,7 +14,10 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
@@ -40,14 +44,14 @@ public class AuthController {
     @Operation(summary = "Rotate refresh token", description = "Exchange mobile refresh token for new access and rotated refresh token")
     public ResponseEntity<TokenRefreshResponse> refresh(@Valid @RequestBody RefreshTokenRequest request, HttpServletRequest httpRequest) {
         String clientIp = httpRequest.getRemoteAddr();
-        String xDeviceId = httpRequest.getHeader("X-Device-Id");
-        String xSignature = httpRequest.getHeader("X-Device-Signature");
-        String xTimestamp = httpRequest.getHeader("X-Device-Timestamp");
-        String xNonce = httpRequest.getHeader("X-Device-Nonce");
-        String xCounter = httpRequest.getHeader("X-Device-Counter");
-        String xContextId = httpRequest.getHeader("X-Device-Context-Id");
-        TokenRefreshResponse response = authService.refreshToken(
-                request, clientIp, xDeviceId, xSignature, xTimestamp, xNonce, xCounter, xContextId);
+        DeviceProof proof = new DeviceProof(
+                httpRequest.getHeader("X-Device-Id"),
+                httpRequest.getHeader("X-Device-Signature"),
+                httpRequest.getHeader("X-Device-Timestamp"),
+                httpRequest.getHeader("X-Device-Nonce"),
+                httpRequest.getHeader("X-Device-Counter"),
+                httpRequest.getHeader("X-Device-Context-Id"));
+        TokenRefreshResponse response = authService.refreshToken(request, clientIp, proof);
         return ResponseEntity.ok(response);
     }
 

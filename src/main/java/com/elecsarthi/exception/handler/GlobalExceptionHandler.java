@@ -1,5 +1,7 @@
 package com.elecsarthi.exception.handler;
 
+import java.time.Clock;
+import lombok.RequiredArgsConstructor;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.exception.errorcode.ErrorResponse;
@@ -18,7 +20,10 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import java.util.stream.Collectors;
 
 @RestControllerAdvice
+@RequiredArgsConstructor
 public class GlobalExceptionHandler {
+
+    private final Clock clock;
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
@@ -27,7 +32,7 @@ public class GlobalExceptionHandler {
         log.warn("API exception [{}]: {}", ex.getErrorCode(), ex.getMessage());
         return ResponseEntity
                 .status(ex.getStatus())
-                .body(new ErrorResponse(ex.getErrorCode().name(), ex.getMessage()));
+                .body(error(ex.getErrorCode().name(), ex.getMessage()));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -38,7 +43,7 @@ public class GlobalExceptionHandler {
         log.warn("Validation failed: {}", details);
         return ResponseEntity
                 .status(HttpStatus.BAD_REQUEST)
-                .body(new ErrorResponse(ErrorCode.VALIDATION_FAILED.name(), "Validation failed: " + details));
+                .body(error(ErrorCode.VALIDATION_FAILED.name(), "Validation failed: " + details));
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
@@ -48,31 +53,31 @@ public class GlobalExceptionHandler {
 
         if (msg.contains("ex_ent_no_overlap")) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(new ErrorResponse(ErrorCode.CONFLICT.name(), "Overlapping active entitlement already exists for this area and period."));
+                    .body(error(ErrorCode.CONFLICT.name(), "Overlapping active entitlement already exists for this area and period."));
         }
         if (msg.contains("ex_ba_slot")) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(new ErrorResponse(ErrorCode.SUBUSER_BOOTH_LIMIT_EXCEEDED.name(), "Subuser already has maximum active booth assignments in this time slot."));
+                    .body(error(ErrorCode.SUBUSER_BOOTH_LIMIT_EXCEEDED.name(), "Subuser already has maximum active booth assignments in this time slot."));
         }
         if (msg.contains("ex_ba_same_booth")) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(new ErrorResponse(ErrorCode.CONFLICT.name(), "Subuser is already assigned to this booth in this period."));
+                    .body(error(ErrorCode.CONFLICT.name(), "Subuser is already assigned to this booth in this period."));
         }
         if (msg.contains("ux_sale_agent_idempotency") || msg.contains("ux_sale_line_criteria")) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(new ErrorResponse(ErrorCode.CONFLICT.name(), "Duplicate sale submission or area already included in sale."));
+                    .body(error(ErrorCode.CONFLICT.name(), "Duplicate sale submission or area already included in sale."));
         }
         if (msg.contains("ux_one_customer_admin")) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(new ErrorResponse(ErrorCode.CONFLICT.name(), "Customer account already has a primary login."));
+                    .body(error(ErrorCode.CONFLICT.name(), "Customer account already has a primary login."));
         }
         if (msg.contains("ux_customer_phone")) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(new ErrorResponse(ErrorCode.CONFLICT.name(), "Customer contact phone number is already registered."));
+                    .body(error(ErrorCode.CONFLICT.name(), "Customer contact phone number is already registered."));
         }
 
         return ResponseEntity.status(HttpStatus.CONFLICT)
-                .body(new ErrorResponse(ErrorCode.CONFLICT.name(), "Database constraint violation occurred."));
+                .body(error(ErrorCode.CONFLICT.name(), "Database constraint violation occurred."));
     }
 
     @ExceptionHandler(AccessDeniedException.class)
@@ -80,7 +85,7 @@ public class GlobalExceptionHandler {
         log.warn("Access denied: {}", ex.getMessage());
         return ResponseEntity
                 .status(HttpStatus.FORBIDDEN)
-                .body(new ErrorResponse(ErrorCode.FORBIDDEN.name(), "Access is denied."));
+                .body(error(ErrorCode.FORBIDDEN.name(), "Access is denied."));
     }
 
     @ExceptionHandler(AuthenticationException.class)
@@ -88,7 +93,7 @@ public class GlobalExceptionHandler {
         log.warn("Authentication failed: {}", ex.getMessage());
         return ResponseEntity
                 .status(HttpStatus.UNAUTHORIZED)
-                .body(new ErrorResponse(ErrorCode.UNAUTHORIZED.name(), "Authentication failed."));
+                .body(error(ErrorCode.UNAUTHORIZED.name(), "Authentication failed."));
     }
 
     @ExceptionHandler(Exception.class)
@@ -96,6 +101,10 @@ public class GlobalExceptionHandler {
         log.error("Unhandled server error", ex);
         return ResponseEntity
                 .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(new ErrorResponse(ErrorCode.INTERNAL_SERVER_ERROR.name(), "An unexpected server error occurred."));
+                .body(error(ErrorCode.INTERNAL_SERVER_ERROR.name(), "An unexpected server error occurred."));
+    }
+
+    private ErrorResponse error(String code, String message) {
+        return new ErrorResponse(code, message, clock.instant());
     }
 }

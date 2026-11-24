@@ -10,7 +10,4 @@ public record ErrorResponse(
     String message,
     Instant timestamp
 ) {
-    public ErrorResponse(String code, String message) {
-        this(code, message, Instant.now());
-    }
 }

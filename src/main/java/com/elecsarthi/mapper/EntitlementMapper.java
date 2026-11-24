@@ -1,5 +1,7 @@
 package com.elecsarthi.mapper;
 
+import java.time.Clock;
+import lombok.RequiredArgsConstructor;
 import com.elecsarthi.dto.response.EntitlementResponse;
 import com.elecsarthi.entity.Entitlement;
 import org.springframework.stereotype.Component;
@@ -8,11 +10,14 @@ import java.time.Duration;
 import java.time.Instant;
 
 @Component
+@RequiredArgsConstructor
 public class EntitlementMapper {
+
+    private final Clock clock;
 
     public EntitlementResponse toResponse(Entitlement e, String electionTypeCode, String electionTypeName) {
         if (e == null) return null;
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         String remainingFormatted = "Expired";
         if (e.getValidUntil() != null && e.getValidUntil().isAfter(now)) {
             Duration dur = Duration.between(now, e.getValidUntil());

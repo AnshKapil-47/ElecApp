@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.util.Locale;
 import com.elecsarthi.entity.Dataset;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.Entitlement;
@@ -65,7 +66,7 @@ public class AreaResolverImpl implements AreaResolver {
         if (electionType.getGuardColumn() == null || electionType.getGuardColumn().isBlank()) {
             return;
         }
-        String guardColumn = electionType.getGuardColumn().trim().toLowerCase();
+        String guardColumn = electionType.getGuardColumn().trim().toLowerCase(Locale.ROOT);
         List<Object> params = new ArrayList<>();
         params.add(datasetId);
         Integer distinctValues = jdbcTemplate.queryForObject(
