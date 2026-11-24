@@ -5,34 +5,63 @@ import com.elecsarthi.dto.request.SaleLineRequest;
 import com.elecsarthi.dto.request.VoidSaleRequest;
 import com.elecsarthi.dto.response.SaleLineResponse;
 import com.elecsarthi.dto.response.SaleResponse;
-import com.elecsarthi.entity.*;
-import com.elecsarthi.enums.*;
+import com.elecsarthi.entity.AgentSale;
+import com.elecsarthi.entity.AgentSaleLine;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.Dataset;
+import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.Entitlement;
+import com.elecsarthi.enums.AuditOutcome;
+import com.elecsarthi.enums.EntitlementSource;
+import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.enums.Role;
+import com.elecsarthi.enums.SaleStatus;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.mapper.SaleMapper;
+import com.elecsarthi.repository.AgentSaleLineRepository;
+import com.elecsarthi.repository.AgentSaleRepository;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
+import com.elecsarthi.repository.ElectionTypeRepository;
+import com.elecsarthi.repository.EntitlementRepository;
+import com.elecsarthi.repository.OfflineLeaseRepository;
 import com.elecsarthi.security.device.CryptoUtils;
+import com.elecsarthi.service.AreaResolver;
 import com.elecsarthi.service.AuditService;
+import com.elecsarthi.service.CriteriaNormalizer.NormalizedCriteria;
 import com.elecsarthi.service.CriteriaNormalizer;
+import com.elecsarthi.service.DatasetService;
 import com.elecsarthi.service.SaleService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.sql.Timestamp;
+import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * Agent sales (quantity only: area, duration, voter-count snapshot; no prices) and their Owner-only void.
+ * A sale, its lines and one entitlement per line are written in one transaction. Sale lines are never
+ * updated; voiding changes only the sale's void columns and revokes its entitlements.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -41,140 +70,63 @@ public class SaleServiceImpl implements SaleService {
     private final AgentSaleRepository agentSaleRepository;
     private final AgentSaleLineRepository agentSaleLineRepository;
     private final EntitlementRepository entitlementRepository;
+    private final OfflineLeaseRepository offlineLeaseRepository;
     private final CustomerAccountRepository customerAccountRepository;
     private final AppUserRepository appUserRepository;
     private final ElectionTypeRepository electionTypeRepository;
-    private final DatasetRepository datasetRepository;
+    private final DatasetService datasetService;
     private final CriteriaNormalizer criteriaNormalizer;
     private final AuditService auditService;
-    private final JdbcTemplate jdbcTemplate;
+    private final SaleMapper saleMapper;
+    private final AreaResolver areaResolver;
+    private final Clock clock;
 
-    private static final ZoneId KOLKATA_ZONE = ZoneId.of("Asia/Kolkata");
-
-    private static class ProcessedLine {
-        CriteriaNormalizer.NormalizedCriteria normalizedCriteria;
-        Dataset dataset;
-        int voterCount;
-        Instant validFrom;
-        Instant validUntil;
-        SaleLineRequest lineRequest;
+    /** A validated sale line: its area resolved to one dataset and its validity window computed. */
+    private record PlannedLine(SaleLineRequest request, NormalizedCriteria criteria, Dataset dataset,
+                               int voterCount, Instant validFrom, Instant validUntil) {
     }
 
     @Override
     @Transactional
     public SaleResponse createSale(Long agentUserId, CreateSaleRequest request) {
-        AppUser agentUser = appUserRepository.findById(agentUserId)
+        AppUser agent = appUserRepository.findById(agentUserId)
                 .orElseThrow(() -> new ResourceNotFoundException("Agent user not found"));
-
-        if (agentUser.getRole() != Role.AGENT) {
+        if (agent.getRole() != Role.AGENT) {
             throw new ForbiddenException("Only agents can perform sales");
         }
 
         CustomerAccount customer = customerAccountRepository.requireById(request.getCustomerAccountId());
-
         if (customer.getStatus() != UserStatus.ACTIVE) {
             throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "Customer account is suspended or not active", HttpStatus.BAD_REQUEST);
         }
-
-        if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(agentUserId)) {
+        if (!customer.isOwnedByAgent(agentUserId)) {
             throw new ForbiddenException("You are not the owning agent for this customer");
         }
 
         ElectionType electionType = electionTypeRepository.requireById(request.getElectionTypeId());
-
         if (!electionType.isActive()) {
             throw new BadRequestException("Election type is not active");
         }
 
-        // Canonical string for idempotency check (use normalized canonical JSON)
-        List<CriteriaNormalizer.NormalizedCriteria> normalizedLines = new ArrayList<>();
-        for (SaleLineRequest lineReq : request.getLines()) {
-            normalizedLines.add(criteriaNormalizer.normalize(electionType, lineReq.getCriteria()));
+        List<NormalizedCriteria> criteria = new ArrayList<>();
+        for (SaleLineRequest lineRequest : request.getLines()) {
+            criteria.add(criteriaNormalizer.normalize(electionType, lineRequest.getCriteria()));
         }
 
-        StringBuilder canonicalPayload = new StringBuilder();
-        canonicalPayload.append(customer.getId()).append(":")
-                .append(electionType.getId()).append(":")
-                .append(request.getStorageTier().name()).append(":[");
-
-        for (int i = 0; i < request.getLines().size(); i++) {
-            SaleLineRequest line = request.getLines().get(i);
-            CriteriaNormalizer.NormalizedCriteria norm = normalizedLines.get(i);
-            if (i > 0) canonicalPayload.append(";");
-            canonicalPayload.append(line.getDurationValue()).append(":")
-                    .append(line.getDurationUnit().name()).append(":")
-                    .append(norm.getCanonicalJson());
-        }
-        canonicalPayload.append("]");
-        String requestSha256 = CryptoUtils.sha256Hex(canonicalPayload.toString());
-
-        // Check idempotency
-        Optional<AgentSale> existingSaleOpt = agentSaleRepository.findBySoldByUserIdAndIdempotencyKey(agentUserId, request.getIdempotencyKey());
-        if (existingSaleOpt.isPresent()) {
-            AgentSale existing = existingSaleOpt.get();
-            if (existing.getRequestSha256().equals(requestSha256)) {
-                log.info("Idempotent replay for sale id={}", existing.getId());
-                return mapToSaleResponse(existing, electionType.getCode().name());
-            } else {
+        String requestSha256 = requestFingerprint(customer, electionType, request, criteria);
+        Optional<AgentSale> replay = agentSaleRepository.findBySoldByUserIdAndIdempotencyKey(agentUserId, request.getIdempotencyKey());
+        if (replay.isPresent()) {
+            if (!replay.get().getRequestSha256().equals(requestSha256)) {
                 throw new ConflictException("Idempotency key reused with different payload");
             }
+            log.info("Idempotent replay for sale id={}", replay.get().getId());
+            return toResponse(replay.get());
         }
 
-        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-        Set<String> seenHashes = new HashSet<>();
-        List<ProcessedLine> processedLines = new ArrayList<>();
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        List<PlannedLine> plan = planLines(customer, electionType, request, criteria, now);
 
-        for (SaleLineRequest lineReq : request.getLines()) {
-            CriteriaNormalizer.NormalizedCriteria normalized = criteriaNormalizer.normalize(electionType, lineReq.getCriteria());
-            if (!seenHashes.add(normalized.getCriteriaHash())) {
-                throw new BadRequestException("Duplicate criteria among sale lines: " + normalized.getScopeLabel());
-            }
-
-            // Area resolution
-            Dataset dataset = resolveDataset(request.getStorageTier(), normalized.getCriteriaMap());
-
-            // Ambiguity guard
-            checkAmbiguity(electionType, dataset.getId(), normalized.getCriteriaMap());
-
-            // Voter count snapshot
-            int voterCount = calculateVoterCount(dataset.getId(), normalized.getCriteriaMap());
-
-            // Back-to-back renewal calculation
-            List<Entitlement> existingEntitlements = entitlementRepository.findLatestActiveForArea(
-                    customer.getId(),
-                    electionType.getId(),
-                    request.getStorageTier(),
-                    normalized.getCriteriaHash());
-
-            Instant validFrom = now;
-            if (!existingEntitlements.isEmpty()) {
-                Entitlement latest = existingEntitlements.get(0);
-                if (latest.getValidUntil().isAfter(now)) {
-                    validFrom = latest.getValidUntil();
-                }
-            }
-
-            Instant validUntil = calculateValidUntil(validFrom, lineReq.getDurationValue(), lineReq.getDurationUnit());
-
-            // MASTER tier check
-            if (request.getStorageTier() == DatasetTier.MASTER) {
-                if (dataset.getDeleteAfter() != null && validUntil.isAfter(dataset.getDeleteAfter())) {
-                    throw new BadRequestException("Validity until " + validUntil + " exceeds MASTER dataset expiration " + dataset.getDeleteAfter());
-                }
-            }
-
-            ProcessedLine pl = new ProcessedLine();
-            pl.normalizedCriteria = normalized;
-            pl.dataset = dataset;
-            pl.voterCount = voterCount;
-            pl.validFrom = validFrom;
-            pl.validUntil = validUntil;
-            pl.lineRequest = lineReq;
-            processedLines.add(pl);
-        }
-
-        // Persist AgentSale
-        AgentSale sale = AgentSale.builder()
+        AgentSale sale = agentSaleRepository.save(AgentSale.builder()
                 .soldByUserId(agentUserId)
                 .customerAccountId(customer.getId())
                 .electionTypeId(electionType.getId())
@@ -183,90 +135,97 @@ public class SaleServiceImpl implements SaleService {
                 .requestSha256(requestSha256)
                 .soldAt(now)
                 .status(SaleStatus.COMPLETED)
-                .build();
-        sale = agentSaleRepository.save(sale);
+                .build());
 
         List<SaleLineResponse> lineResponses = new ArrayList<>();
-
-        for (int i = 0; i < processedLines.size(); i++) {
-            ProcessedLine pl = processedLines.get(i);
-            short lineNo = (short) (i + 1);
-
-            AgentSaleLine saleLine = AgentSaleLine.builder()
-                    .saleId(sale.getId())
-                    .lineNo(lineNo)
-                    .datasetId(pl.dataset.getId())
-                    .datasetName(pl.dataset.getName())
-                    .storageTier(request.getStorageTier())
-                    .criteria(pl.normalizedCriteria.getCanonicalJson())
-                    .criteriaHash(pl.normalizedCriteria.getCriteriaHash())
-                    .scopeLabel(pl.normalizedCriteria.getScopeLabel())
-                    .voterCountSnapshot(pl.voterCount)
-                    .durationValue(pl.lineRequest.getDurationValue())
-                    .durationUnit(pl.lineRequest.getDurationUnit())
-                    .validFrom(pl.validFrom)
-                    .validUntil(pl.validUntil)
-                    .build();
-            saleLine = agentSaleLineRepository.save(saleLine);
-
-            Entitlement entitlement = Entitlement.builder()
-                    .customerAccountId(customer.getId())
-                    .electionTypeId(electionType.getId())
-                    .datasetId(pl.dataset.getId())
-                    .storageTier(request.getStorageTier())
-                    .criteria(pl.normalizedCriteria.getCanonicalJson())
-                    .criteriaHash(pl.normalizedCriteria.getCriteriaHash())
-                    .scopeLabel(pl.normalizedCriteria.getScopeLabel())
-                    .source(EntitlementSource.SALE)
-                    .saleLineId(saleLine.getId())
-                    .status(EntitlementStatus.ACTIVE)
-                    .validFrom(pl.validFrom)
-                    .validUntil(pl.validUntil)
-                    .mobileAccess(false)
-                    .createdByUserId(agentUserId)
-                    .createdAt(now)
-                    .build();
-            entitlement = entitlementRepository.save(entitlement);
-
-            lineResponses.add(SaleLineResponse.builder()
-                    .id(saleLine.getId())
-                    .lineNo(lineNo)
-                    .storageTier(saleLine.getStorageTier())
-                    .scopeLabel(saleLine.getScopeLabel())
-                    .criteriaHash(saleLine.getCriteriaHash())
-                    .voterCountSnapshot(saleLine.getVoterCountSnapshot())
-                    .durationValue(saleLine.getDurationValue())
-                    .durationUnit(saleLine.getDurationUnit())
-                    .validFrom(saleLine.getValidFrom())
-                    .validUntil(saleLine.getValidUntil())
-                    .entitlementId(entitlement.getId())
-                    .build());
+        for (int i = 0; i < plan.size(); i++) {
+            lineResponses.add(persistLine(sale, (short) (i + 1), plan.get(i), customer, agentUserId, now));
         }
 
-        // Update LONG_TERM dataset delete_after to max(validUntil) + 30 days
-        for (ProcessedLine pl : processedLines) {
-            if (pl.dataset.getStorageTier() == DatasetTier.LONG_TERM) {
-                recomputeLongTermRetention(pl.dataset.getId(), now);
+        for (PlannedLine line : plan) {
+            datasetService.recomputeLongTermRetention(line.dataset().getId(), now);
+        }
+
+        auditService.logDetails(agentUserId, customer.getId(), null, null, "AGENT_SALE_CREATED", AuditOutcome.SUCCESS,
+                "agent_sale", sale.getId().toString(), Map.of("lines", lineResponses.size()), null);
+
+        return saleMapper.toResponse(sale, electionType.getCode().name(), lineResponses);
+    }
+
+    /**
+     * Identifies the request content for idempotency: the same key with the same canonical lines is a replay,
+     * the same key with different lines is a conflict. The format must stay stable, since stored hashes are
+     * compared against it.
+     */
+    private String requestFingerprint(CustomerAccount customer, ElectionType electionType, CreateSaleRequest request,
+                                      List<NormalizedCriteria> criteria) {
+        List<String> lines = new ArrayList<>();
+        for (int i = 0; i < criteria.size(); i++) {
+            SaleLineRequest line = request.getLines().get(i);
+            lines.add(line.getDurationValue() + ":" + line.getDurationUnit().name() + ":" + criteria.get(i).getCanonicalJson());
+        }
+        return CryptoUtils.sha256Hex(customer.getId() + ":" + electionType.getId() + ":"
+                + request.getStorageTier().name() + ":[" + String.join(";", lines) + "]");
+    }
+
+    private List<PlannedLine> planLines(CustomerAccount customer, ElectionType electionType, CreateSaleRequest request,
+                                        List<NormalizedCriteria> criteria, Instant now) {
+        Set<String> seenAreas = new HashSet<>();
+        List<PlannedLine> plan = new ArrayList<>();
+        for (int i = 0; i < criteria.size(); i++) {
+            SaleLineRequest lineRequest = request.getLines().get(i);
+            NormalizedCriteria area = criteria.get(i);
+            if (!seenAreas.add(area.getCriteriaHash())) {
+                throw new BadRequestException("Duplicate criteria among sale lines: " + area.getScopeLabel());
             }
+
+            Dataset dataset = areaResolver.resolveDataset(request.getStorageTier(), electionType, area);
+            int voterCount = areaResolver.countVoters(dataset.getId(), area);
+            AreaResolver.ValidityWindow window = areaResolver.validityWindow(customer.getId(), electionType,
+                    request.getStorageTier(), area, dataset, lineRequest.getDurationValue(), lineRequest.getDurationUnit(), now);
+            plan.add(new PlannedLine(lineRequest, area, dataset, voterCount, window.validFrom(), window.validUntil()));
         }
+        return plan;
+    }
 
-        auditService.logDetails(agentUserId, customer.getId(), null, null,
-                "AGENT_SALE_CREATED", AuditOutcome.SUCCESS,
-                "agent_sale", sale.getId().toString(),
-                Map.of("lines", lineResponses.size()), null);
-
-        return SaleResponse.builder()
-                .id(sale.getId())
-                .soldByUserId(sale.getSoldByUserId())
-                .customerAccountId(sale.getCustomerAccountId())
-                .electionTypeId(sale.getElectionTypeId())
-                .electionTypeCode(electionType.getCode().name())
+    private SaleLineResponse persistLine(AgentSale sale, short lineNo, PlannedLine line, CustomerAccount customer,
+                                         Long agentUserId, Instant now) {
+        NormalizedCriteria area = line.criteria();
+        AgentSaleLine saleLine = agentSaleLineRepository.save(AgentSaleLine.builder()
+                .saleId(sale.getId())
+                .lineNo(lineNo)
+                .datasetId(line.dataset().getId())
+                .datasetName(line.dataset().getName())
                 .storageTier(sale.getStorageTier())
-                .idempotencyKey(sale.getIdempotencyKey())
-                .soldAt(sale.getSoldAt())
-                .status(sale.getStatus())
-                .lines(lineResponses)
-                .build();
+                .criteria(area.getCanonicalJson())
+                .criteriaHash(area.getCriteriaHash())
+                .scopeLabel(area.getScopeLabel())
+                .voterCountSnapshot(line.voterCount())
+                .durationValue(line.request().getDurationValue())
+                .durationUnit(line.request().getDurationUnit())
+                .validFrom(line.validFrom())
+                .validUntil(line.validUntil())
+                .build());
+
+        Entitlement entitlement = entitlementRepository.save(Entitlement.builder()
+                .customerAccountId(customer.getId())
+                .electionTypeId(sale.getElectionTypeId())
+                .datasetId(line.dataset().getId())
+                .storageTier(sale.getStorageTier())
+                .criteria(area.getCanonicalJson())
+                .criteriaHash(area.getCriteriaHash())
+                .scopeLabel(area.getScopeLabel())
+                .source(EntitlementSource.SALE)
+                .saleLineId(saleLine.getId())
+                .status(EntitlementStatus.ACTIVE)
+                .validFrom(line.validFrom())
+                .validUntil(line.validUntil())
+                .mobileAccess(false)
+                .createdByUserId(agentUserId)
+                .createdAt(now)
+                .build());
+
+        return saleMapper.toLineResponse(saleLine, saleLine.getStorageTier(), saleLine.getScopeLabel(), entitlement.getId());
     }
 
     @Override
@@ -274,66 +233,47 @@ public class SaleServiceImpl implements SaleService {
     public SaleResponse voidSale(Long ownerUserId, Long saleId, VoidSaleRequest request) {
         AppUser owner = appUserRepository.findById(ownerUserId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
-
         if (owner.getRole() != Role.OWNER) {
             throw new ForbiddenException("Only OWNER can void a sale");
         }
-
         AgentSale sale = agentSaleRepository.findById(saleId)
                 .orElseThrow(() -> new ResourceNotFoundException("Sale not found"));
-
         if (sale.getStatus() == SaleStatus.VOIDED) {
             throw new BadRequestException("Sale is already voided");
         }
 
-        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         sale.setStatus(SaleStatus.VOIDED);
         sale.setVoidedAt(now);
         sale.setVoidReason(request.getVoidReason());
         sale.setVoidedByUserId(ownerUserId);
         agentSaleRepository.save(sale);
 
-        // Revoke matching entitlements
-        List<AgentSaleLine> lines = agentSaleLineRepository.findBySaleIdOrderByLineNoAsc(saleId);
+        List<Long> lineIds = agentSaleLineRepository.findBySaleIdOrderByLineNoAsc(saleId).stream()
+                .map(AgentSaleLine::getId).toList();
         Set<Long> affectedDatasetIds = new HashSet<>();
-        for (AgentSaleLine line : lines) {
-            entitlementRepository.findBySaleLineId(line.getId()).ifPresent(ent -> {
-                ent.setStatus(EntitlementStatus.REVOKED);
-                ent.setRevokedAt(now);
-                ent.setRevokeReason("Sale voided: " + request.getVoidReason());
-                ent.setRevokedByUserId(ownerUserId);
-                entitlementRepository.saveAndFlush(ent);
-                affectedDatasetIds.add(ent.getDatasetId());
-
-                // Cascade-revoke offline leases for booth assignments under this entitlement
-                jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? " +
-                        "WHERE booth_assignment_id IN (SELECT id FROM booth_assignment WHERE entitlement_id = ?) AND revoked_at IS NULL",
-                        java.sql.Timestamp.from(now), ownerUserId, ent.getId());
-            });
+        for (Entitlement entitlement : entitlementRepository.findBySaleLineIdIn(lineIds)) {
+            entitlement.setStatus(EntitlementStatus.REVOKED);
+            entitlement.setRevokedAt(now);
+            entitlement.setRevokeReason("Sale voided: " + request.getVoidReason());
+            entitlement.setRevokedByUserId(ownerUserId);
+            entitlementRepository.saveAndFlush(entitlement);
+            offlineLeaseRepository.revokeActiveByEntitlementId(entitlement.getId(), now, ownerUserId);
+            affectedDatasetIds.add(entitlement.getDatasetId());
         }
+        affectedDatasetIds.forEach(datasetId -> datasetService.recomputeLongTermRetention(datasetId, now));
 
-        // Recompute delete_after for affected LONG_TERM datasets
-        for (Long dsId : affectedDatasetIds) {
-            recomputeLongTermRetention(dsId, now);
-        }
-
-        // Increment customer's mobile access policy version
-        customerAccountRepository.findById(sale.getCustomerAccountId()).ifPresent(ca -> {
-            ca.setMobileAccessPolicyVersion(ca.getMobileAccessPolicyVersion() + 1);
-            customerAccountRepository.save(ca);
+        // Bumping the version makes the Customer's apps re-check their mobile-number access.
+        customerAccountRepository.findById(sale.getCustomerAccountId()).ifPresent(customer -> {
+            customer.bumpMobileAccessPolicyVersion();
+            customerAccountRepository.save(customer);
         });
 
-        // Safe audit logging with Map
-        auditService.logDetails(ownerUserId, sale.getCustomerAccountId(), null, null,
-                "SALE_VOIDED", AuditOutcome.SUCCESS,
+        auditService.logDetails(ownerUserId, sale.getCustomerAccountId(), null, null, "SALE_VOIDED", AuditOutcome.SUCCESS,
                 "agent_sale", sale.getId().toString(),
                 Map.of("reason", request.getVoidReason() != null ? request.getVoidReason() : ""), null);
 
-        String code = electionTypeRepository.findById(sale.getElectionTypeId())
-                .map(et -> et.getCode().name())
-                .orElse("UNKNOWN");
-
-        return mapToSaleResponse(sale, code);
+        return toResponse(sale);
     }
 
     @Override
@@ -341,33 +281,19 @@ public class SaleServiceImpl implements SaleService {
     public SaleResponse getSale(Long callerUserId, Role callerRole, Long saleId) {
         AgentSale sale = agentSaleRepository.findById(saleId)
                 .orElseThrow(() -> new ResourceNotFoundException("Sale not found"));
-
         if (callerRole == Role.SUBOWNER) {
             throw new ForbiddenException("Subowners are not permitted to view sales records");
         }
-
         if (callerRole == Role.AGENT && !sale.getSoldByUserId().equals(callerUserId)) {
             throw new ForbiddenException("Agents can only view their own sales");
         }
-
-        String code = electionTypeRepository.findById(sale.getElectionTypeId())
-                .map(et -> et.getCode().name())
-                .orElse("UNKNOWN");
-
-        return mapToSaleResponse(sale, code);
+        return toResponse(sale);
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<SaleResponse> getSalesByAgent(Long agentUserId) {
-        return agentSaleRepository.findBySoldByUserIdOrderBySoldAtDesc(agentUserId).stream()
-                .map(s -> {
-                    String code = electionTypeRepository.findById(s.getElectionTypeId())
-                            .map(et -> et.getCode().name())
-                            .orElse("UNKNOWN");
-                    return mapToSaleResponse(s, code);
-                })
-                .collect(Collectors.toList());
+        return toResponses(agentSaleRepository.findBySoldByUserIdOrderBySoldAtDesc(agentUserId));
     }
 
     @Override
@@ -376,159 +302,38 @@ public class SaleServiceImpl implements SaleService {
         if (callerRole == Role.SUBOWNER) {
             throw new ForbiddenException("Subowners cannot view sales records");
         }
-
-        if (callerRole == Role.AGENT) {
-            CustomerAccount customer = customerAccountRepository.requireById(customerAccountId);
-            if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
-                throw new ForbiddenException("You are not the owning agent for this customer");
-            }
+        if (callerRole == Role.AGENT && !customerAccountRepository.requireById(customerAccountId).isOwnedByAgent(callerUserId)) {
+            throw new ForbiddenException("You are not the owning agent for this customer");
         }
-
-        return agentSaleRepository.findByCustomerAccountIdOrderBySoldAtDesc(customerAccountId).stream()
-                .map(s -> {
-                    String code = electionTypeRepository.findById(s.getElectionTypeId())
-                            .map(et -> et.getCode().name())
-                            .orElse("UNKNOWN");
-                    return mapToSaleResponse(s, code);
-                })
-                .collect(Collectors.toList());
+        return toResponses(agentSaleRepository.findByCustomerAccountIdOrderBySoldAtDesc(customerAccountId));
     }
 
-    public void recomputeLongTermRetention(Long datasetId, Instant now) {
-        datasetRepository.findById(datasetId).ifPresent(ds -> {
-            if (ds.getStorageTier() == DatasetTier.LONG_TERM) {
-                String maxSql = "SELECT MAX(valid_until) FROM entitlement WHERE dataset_id = ? AND status = 'ACTIVE'";
-                Timestamp maxTs = jdbcTemplate.queryForObject(maxSql, Timestamp.class, datasetId);
-                Instant recomputed = (maxTs != null)
-                        ? maxTs.toInstant().plus(30, ChronoUnit.DAYS)
-                        : now.plus(30, ChronoUnit.DAYS);
-                ds.setDeleteAfter(recomputed);
-                datasetRepository.save(ds);
-                log.info("Recomputed LONG_TERM dataset {} delete_after to {}", datasetId, recomputed);
-            }
-        });
+    private SaleResponse toResponse(AgentSale sale) {
+        return toResponses(List.of(sale)).get(0);
     }
 
-    private Dataset resolveDataset(DatasetTier tier, Map<String, Object> criteriaMap) {
-        StringBuilder sql = new StringBuilder("SELECT DISTINCT v.dataset_id FROM voter v " +
-                "JOIN dataset d ON d.id = v.dataset_id " +
-                "WHERE d.storage_tier = ? AND d.status = 'IMPORTED'");
-
-        List<Object> params = new ArrayList<>();
-        params.add(tier.name());
-
-        for (Map.Entry<String, Object> entry : criteriaMap.entrySet()) {
-            sql.append(" AND v.").append(entry.getKey()).append(" = ?");
-            params.add(entry.getValue());
+    /** Builds responses for many sales with a fixed number of queries, however many sales and lines there are. */
+    private List<SaleResponse> toResponses(List<AgentSale> sales) {
+        if (sales.isEmpty()) {
+            return List.of();
         }
+        List<Long> saleIds = sales.stream().map(AgentSale::getId).toList();
+        Map<Long, List<AgentSaleLine>> linesBySale = agentSaleLineRepository
+                .findBySaleIdInOrderBySaleIdAscLineNoAsc(saleIds).stream()
+                .collect(Collectors.groupingBy(AgentSaleLine::getSaleId));
+        Collection<Long> lineIds = linesBySale.values().stream().flatMap(List::stream).map(AgentSaleLine::getId).toList();
+        Map<Long, Long> entitlementIdByLine = entitlementRepository.findBySaleLineIdIn(lineIds).stream()
+                .collect(Collectors.toMap(Entitlement::getSaleLineId, Entitlement::getId));
+        Map<Short, String> electionTypeCodes = electionTypeRepository.findAll().stream()
+                .collect(Collectors.toMap(ElectionType::getId, type -> type.getCode().name()));
 
-        List<Long> matchingDatasetIds = jdbcTemplate.query(sql.toString(), (rs, rowNum) -> rs.getLong(1), params.toArray());
-
-        if (matchingDatasetIds.isEmpty()) {
-            throw new ApiException(ErrorCode.AREA_UNAVAILABLE, "Area not available for storage tier " + tier, HttpStatus.BAD_REQUEST);
-        }
-
-        if (matchingDatasetIds.size() > 1) {
-            throw new ApiException(ErrorCode.AREA_MULTIPLE_DATASETS, "Multiple datasets found for this area in tier " + tier, HttpStatus.BAD_REQUEST);
-        }
-
-        Long datasetId = matchingDatasetIds.get(0);
-        Dataset dataset = datasetRepository.findByIdForUpdate(datasetId)
-                .orElseThrow(() -> new ResourceNotFoundException("Resolved dataset not found: " + datasetId));
-        if (dataset.getStatus() != DatasetStatus.IMPORTED) {
-            throw new ApiException(ErrorCode.AREA_UNAVAILABLE, "Dataset is not in IMPORTED state: " + dataset.getStatus(), HttpStatus.BAD_REQUEST);
-        }
-        return dataset;
-    }
-
-    private void checkAmbiguity(ElectionType electionType, Long datasetId, Map<String, Object> criteriaMap) {
-        if (electionType.getGuardColumn() == null || electionType.getGuardColumn().isBlank()) {
-            return;
-        }
-
-        String guardCol = electionType.getGuardColumn().trim().toLowerCase();
-        StringBuilder sql = new StringBuilder("SELECT COUNT(DISTINCT ")
-                .append(guardCol)
-                .append(") FROM voter WHERE dataset_id = ?");
-
-        List<Object> params = new ArrayList<>();
-        params.add(datasetId);
-
-        for (Map.Entry<String, Object> entry : criteriaMap.entrySet()) {
-            sql.append(" AND ").append(entry.getKey()).append(" = ?");
-            params.add(entry.getValue());
-        }
-
-        Integer count = jdbcTemplate.queryForObject(sql.toString(), Integer.class, params.toArray());
-        if (count != null && count > 1) {
-            throw new ApiException(ErrorCode.AMBIGUOUS_AREA,
-                    "Area contains multiple " + guardCol + " values; ambiguous area",
-                    HttpStatus.BAD_REQUEST);
-        }
-    }
-
-    private int calculateVoterCount(Long datasetId, Map<String, Object> criteriaMap) {
-        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM voter WHERE dataset_id = ?");
-        List<Object> params = new ArrayList<>();
-        params.add(datasetId);
-
-        for (Map.Entry<String, Object> entry : criteriaMap.entrySet()) {
-            sql.append(" AND ").append(entry.getKey()).append(" = ?");
-            params.add(entry.getValue());
-        }
-
-        Integer count = jdbcTemplate.queryForObject(sql.toString(), Integer.class, params.toArray());
-        return count != null ? count : 0;
-    }
-
-    private Instant calculateValidUntil(Instant validFrom, int durationValue, DurationUnit durationUnit) {
-        ZonedDateTime start = validFrom.atZone(KOLKATA_ZONE);
-        ZonedDateTime end;
-        switch (durationUnit) {
-            case DAY -> end = start.plusDays(durationValue);
-            case WEEK -> end = start.plusWeeks(durationValue);
-            case MONTH -> end = start.plusMonths(durationValue);
-            default -> throw new BadRequestException("Unsupported duration unit: " + durationUnit);
-        }
-        return end.toInstant();
-    }
-
-    private SaleResponse mapToSaleResponse(AgentSale sale, String electionTypeCode) {
-        List<AgentSaleLine> lines = agentSaleLineRepository.findBySaleIdOrderByLineNoAsc(sale.getId());
-        List<SaleLineResponse> lineResponses = lines.stream()
-                .map(l -> {
-                    Long entId = entitlementRepository.findBySaleLineId(l.getId())
-                            .map(Entitlement::getId)
-                            .orElse(null);
-                    return SaleLineResponse.builder()
-                            .id(l.getId())
-                            .lineNo(l.getLineNo())
-                            .storageTier(l.getStorageTier())
-                            .scopeLabel(l.getScopeLabel())
-                            .criteriaHash(l.getCriteriaHash())
-                            .voterCountSnapshot(l.getVoterCountSnapshot())
-                            .durationValue(l.getDurationValue())
-                            .durationUnit(l.getDurationUnit())
-                            .validFrom(l.getValidFrom())
-                            .validUntil(l.getValidUntil())
-                            .entitlementId(entId)
-                            .build();
-                })
-                .collect(Collectors.toList());
-
-        return SaleResponse.builder()
-                .id(sale.getId())
-                .soldByUserId(sale.getSoldByUserId())
-                .customerAccountId(sale.getCustomerAccountId())
-                .electionTypeId(sale.getElectionTypeId())
-                .electionTypeCode(electionTypeCode)
-                .storageTier(sale.getStorageTier())
-                .idempotencyKey(sale.getIdempotencyKey())
-                .soldAt(sale.getSoldAt())
-                .status(sale.getStatus())
-                .voidedAt(sale.getVoidedAt())
-                .voidReason(sale.getVoidReason())
-                .lines(lineResponses)
-                .build();
+        return sales.stream()
+                .map(sale -> saleMapper.toResponse(sale,
+                        electionTypeCodes.getOrDefault(sale.getElectionTypeId(), "UNKNOWN"),
+                        linesBySale.getOrDefault(sale.getId(), List.of()).stream()
+                                .map(line -> saleMapper.toLineResponse(line, line.getStorageTier(), line.getScopeLabel(),
+                                        entitlementIdByLine.get(line.getId())))
+                                .toList()))
+                .toList();
     }
 }

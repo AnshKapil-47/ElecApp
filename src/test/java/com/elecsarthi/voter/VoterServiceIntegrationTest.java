@@ -366,4 +366,98 @@ public class VoterServiceIntegrationTest {
                 customerUser1.getId(), Role.CUSTOMER, customer1.getId(), entitlement.getId(), null);
         assertEquals(0, statsAfter.getTotalVoted());
     }
+
+    @Autowired
+    private com.elecsarthi.service.SyncService syncService;
+
+    @Autowired
+    private UserDeviceRepository deviceRepository;
+
+    private List<String> mobileNumbersSeenBy(AppUser user, Role role) {
+        VoterSearchRequest request = VoterSearchRequest.builder().entitlementId(entitlement.getId()).page(0).limit(10).build();
+        List<String> numbers = new ArrayList<>();
+        voterService.searchVoters(user.getId(), role, customer1.getId(), request)
+                .forEach(voter -> numbers.add(voter.getMobileNumber()));
+        voterService.getFamilyMembers(user.getId(), role, customer1.getId(), entitlement.getId(), voter1Id)
+                .forEach(voter -> numbers.add(voter.getMobileNumber()));
+        numbers.add(voterService.getVoterDetail(user.getId(), role, customer1.getId(), entitlement.getId(), voter1Id).getMobileNumber());
+        return numbers;
+    }
+
+    @Test
+    @DisplayName("Mobile numbers: search, family and detail unmask only for a Customer with all three gates open")
+    void testMobileGatesApplyOnEveryVoterPath() {
+        appProperties.setMobileNumbersEnabled(true);
+
+        List<String> customerView = mobileNumbersSeenBy(customerUser1, Role.CUSTOMER);
+        assertFalse(customerView.isEmpty());
+        assertTrue(customerView.stream().noneMatch(n -> n == null || n.contains("*")),
+                "Customer sees plain numbers when the switch, the role and the entitlement allow it");
+
+        List<String> subuserView = mobileNumbersSeenBy(subuser1, Role.SUBUSER);
+        assertFalse(subuserView.isEmpty());
+        assertTrue(subuserView.stream().allMatch(n -> n != null && n.contains("*****")),
+                "A Subuser never sees an unmasked number, whatever the switch and entitlement say");
+
+        jdbcTemplate.update("UPDATE entitlement SET mobile_access = false WHERE id = ?", entitlement.getId());
+        assertTrue(mobileNumbersSeenBy(customerUser1, Role.CUSTOMER).stream().allMatch(n -> n != null && n.contains("*****")),
+                "Without mobile_access on the entitlement the Customer's numbers stay masked");
+
+        jdbcTemplate.update("UPDATE entitlement SET mobile_access = true WHERE id = ?", entitlement.getId());
+        appProperties.setMobileNumbersEnabled(false);
+        assertTrue(mobileNumbersSeenBy(customerUser1, Role.CUSTOMER).stream().allMatch(n -> n != null && n.contains("*****")),
+                "With the global switch off the Customer's numbers stay masked");
+    }
+
+    @Test
+    @DisplayName("Bulk sync: chunk records follow the same three mobile-number gates as online reads")
+    void testSyncChunkAppliesMobileGates() {
+        Instant now = Instant.now();
+        UserDevice device = deviceRepository.save(UserDevice.builder()
+                .userId(customerUser1.getId())
+                .customerAccountId(customer1.getId())
+                .userRole(Role.CUSTOMER)
+                .platform(DevicePlatform.ANDROID)
+                .deviceName("Customer Phone")
+                .installationId("inst-voter-sync")
+                .publicKey("pk-voter-sync")
+                .status(DeviceStatus.ACTIVE)
+                .activatedAt(now)
+                .lastUsedAt(now)
+                .lastRequestCounter(0L)
+                .createdAt(now)
+                .build());
+
+        for (boolean globalSwitch : new boolean[]{true, false}) {
+            appProperties.setMobileNumbersEnabled(globalSwitch);
+            SyncSessionResponse session = syncService.startSyncSession(customerUser1.getId(), Role.CUSTOMER, customer1.getId(),
+                    device.getId(), StartSyncSessionRequest.builder().entitlementId(entitlement.getId()).build());
+            assertEquals(globalSwitch, session.isIncludesMobile());
+
+            SyncChunkResponse chunk = syncService.getChunk(customerUser1.getId(), Role.CUSTOMER, customer1.getId(), session.getSessionId(), 0);
+            assertFalse(chunk.getRecords().isEmpty());
+            for (VoterSummaryResponse record : chunk.getRecords()) {
+                assertEquals(globalSwitch, !record.getMobileNumber().contains("*"),
+                        "Sync must unmask exactly when the online read would (switch " + globalSwitch + ")");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Voter responses never expose dataset internals")
+    void testVoterResponsesExposeNoDatasetInternals() throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        VoterSearchRequest request = VoterSearchRequest.builder().entitlementId(entitlement.getId()).page(0).limit(10).build();
+
+        List<Object> responses = new ArrayList<>();
+        responses.addAll(voterService.searchVoters(customerUser1.getId(), Role.CUSTOMER, customer1.getId(), request).getContent());
+        responses.addAll(voterService.getFamilyMembers(customerUser1.getId(), Role.CUSTOMER, customer1.getId(), entitlement.getId(), voter1Id));
+        responses.add(voterService.getVoterDetail(customerUser1.getId(), Role.CUSTOMER, customer1.getId(), entitlement.getId(), voter1Id));
+        responses.add(voterService.getVoterSlip(customerUser1.getId(), Role.CUSTOMER, customer1.getId(), entitlement.getId(), voter1Id));
+
+        for (Object response : responses) {
+            String body = json.writeValueAsString(response).toLowerCase();
+            assertFalse(body.contains("dataset"), "Response must not mention a dataset: " + body);
+        }
+    }
 }

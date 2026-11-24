@@ -22,17 +22,20 @@ import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
+import com.elecsarthi.mapper.VoterMapper;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.repository.SyncSessionRepository;
 import com.elecsarthi.repository.UserDeviceRepository;
+import com.elecsarthi.security.authorization.VoterAccessAuthorizer;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.SyncService;
+import com.elecsarthi.service.VoterService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -43,8 +46,6 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.nio.charset.StandardCharsets;
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -61,6 +62,9 @@ public class SyncServiceImpl implements SyncService {
     private final CustomerAccountRepository customerAccountRepository;
     private final UserDeviceRepository deviceRepository;
     private final VoterScopeAuthorizer voterScopeAuthorizer;
+    private final VoterAccessAuthorizer voterAccessAuthorizer;
+    private final VoterMapper voterMapper;
+    private final VoterService voterService;
     private final AppProperties appProperties;
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
@@ -114,7 +118,7 @@ public class SyncServiceImpl implements SyncService {
         String manifestPayload = customerAccountId + ":" + ent.getId() + ":" + totalRecords + ":" + totalChunks + ":" + ent.getCriteriaHash();
         String manifestSha256 = CryptoUtils.sha256Hex(manifestPayload);
 
-        boolean includesMobile = appProperties.isMobileNumbersEnabled() && ent.isMobileAccess();
+        boolean includesMobile = mobileNumbersVisible(callerRole, ent);
 
         SyncSession session = SyncSession.builder()
                 .customerAccountId(customerAccountId)
@@ -240,37 +244,9 @@ public class SyncServiceImpl implements SyncService {
         params.add(session.getChunkSize());
         params.add(offset);
 
-        List<VoterSummaryResponse> records = jdbcTemplate.query(sql.toString(), (rs, rowNum) -> {
-            byte[] encMobile = rs.getBytes("mobile_no_enc");
-            String mobileStr = processMobileNumber(encMobile, callerRole, ent.isMobileAccess());
-
-            Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
-            Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
-
-            Integer boothValue = rs.getObject(boothColumn, Integer.class);
-
-            return VoterSummaryResponse.builder()
-                    .id(rs.getLong("id"))
-                    .datasetId(rs.getLong("dataset_id"))
-                    .voterId(rs.getString("voter_id"))
-                    .serialNo(rs.getObject("serial_no", Integer.class))
-                    .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
-                    .firstNameEn(rs.getString("v_fname_en"))
-                    .lastNameEn(rs.getString("v_lname_en"))
-                    .firstNameMt(rs.getString("v_fname_mt"))
-                    .lastNameMt(rs.getString("v_lname_mt"))
-                    .relationFirstNameEn(rs.getString("vr_fname_en"))
-                    .relationLastNameEn(rs.getString("vr_lname_en"))
-                    .houseNo(rs.getString("house_no"))
-                    .age(rs.getObject("age", Integer.class))
-                    .gender(rs.getString("sex"))
-                    .sectionNameEn(rs.getString("section_name_en"))
-                    .mobileNumber(mobileStr)
-                    .voted(rs.getBoolean("is_voted"))
-                    .votedAt(votedAt)
-                    .build();
-        }, params.toArray());
+        boolean mobileUnmasked = mobileNumbersVisible(callerRole, ent);
+        List<VoterSummaryResponse> records = jdbcTemplate.query(sql.toString(),
+                voterMapper.summaryRowMapper(boothColumn, mobileUnmasked), params.toArray());
 
         session.setChunksDone(Math.max(session.getChunksDone(), chunkNo + 1));
         syncSessionRepository.save(session);
@@ -330,32 +306,9 @@ public class SyncServiceImpl implements SyncService {
                 .build();
     }
 
-    private String processMobileNumber(byte[] mobileNoEnc, Role callerRole, boolean entitlementMobileAccess) {
-        if (mobileNoEnc == null || mobileNoEnc.length == 0) {
-            return null;
-        }
-
-        boolean canViewUnmasked = appProperties.isMobileNumbersEnabled() &&
-                callerRole == Role.CUSTOMER &&
-                entitlementMobileAccess;
-
-        try {
-            byte[] key = HexFormat.of().parseHex(appProperties.getSecurity().getVoterMobileAesKeyHex());
-            byte[] decrypted = CryptoUtils.aesGcmDecrypt(mobileNoEnc, key);
-            String plain = new String(decrypted, StandardCharsets.UTF_8).trim();
-            if (canViewUnmasked) {
-                return plain;
-            } else {
-                if (plain.length() >= 4) {
-                    return "+91*****" + plain.substring(plain.length() - 4);
-                } else {
-                    return "+91**********";
-                }
-            }
-        } catch (Exception e) {
-            // Never serve raw bytes if decryption fails; log warning and return null
-            log.warn("Sync voter mobile decryption failed: {}", e.getMessage());
-            return null;
-        }
+    /** All three gates of the mobile-number rule: global switch on, caller is a CUSTOMER, entitlement allows it. */
+    private boolean mobileNumbersVisible(Role callerRole, Entitlement entitlement) {
+        return voterAccessAuthorizer.isMobileUnmasked(
+                voterService.isGlobalMobileNumbersEnabled(), callerRole, entitlement.isMobileAccess());
     }
 }

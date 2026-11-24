@@ -186,7 +186,7 @@ public class CustomerServiceImpl implements CustomerService {
         customer.setSuspensionReason(reason != null ? reason.trim() : "ADMIN_SUSPENDED");
         customer.setSuspendedByUserId(callerUserId);
         customer.setSuspendedAt(now);
-        customer.setMobileAccessPolicyVersion(customer.getMobileAccessPolicyVersion() + 1);
+        customer.bumpMobileAccessPolicyVersion();
 
         customerAccountRepository.save(customer);
 
@@ -195,10 +195,7 @@ public class CustomerServiceImpl implements CustomerService {
         for (AppUser u : users) {
             List<UserSession> sessions = sessionRepository.findByUserIdAndStatus(u.getId(), SessionStatus.ACTIVE);
             for (UserSession s : sessions) {
-                s.setStatus(SessionStatus.TERMINATED);
-                s.setTerminatedAt(now);
-                s.setTerminationReason("CUSTOMER_SUSPENDED");
-                s.setTerminatedByUserId(callerUserId);
+                s.terminate(now, "CUSTOMER_SUSPENDED", callerUserId);
                 sessionRepository.save(s);
             }
         }
@@ -227,7 +224,7 @@ public class CustomerServiceImpl implements CustomerService {
         customer.setSuspensionReason(null);
         customer.setSuspendedByUserId(null);
         customer.setSuspendedAt(null);
-        customer.setMobileAccessPolicyVersion(customer.getMobileAccessPolicyVersion() + 1);
+        customer.bumpMobileAccessPolicyVersion();
 
         customerAccountRepository.save(customer);
 
@@ -281,7 +278,7 @@ public class CustomerServiceImpl implements CustomerService {
                 .orElseThrow(() -> new ResourceNotFoundException("Customer not found."));
 
         if (callerRole == Role.AGENT) {
-            if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
+            if (!customer.isOwnedByAgent(callerUserId)) {
                 // Return 404 so existence is not leaked to unauthorized agents
                 throw new ResourceNotFoundException("Customer not found.");
             }

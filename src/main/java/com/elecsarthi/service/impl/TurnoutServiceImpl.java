@@ -69,7 +69,6 @@ public class TurnoutServiceImpl implements TurnoutService {
         jdbcTemplate.update(insertSql, ent.getDatasetId(), customerAccountId, request.getVoterRowId(), callerUserId);
 
         return TurnoutResponse.builder()
-                .datasetId(ent.getDatasetId())
                 .customerAccountId(customerAccountId)
                 .voterRowId(request.getVoterRowId())
                 .voted(true)

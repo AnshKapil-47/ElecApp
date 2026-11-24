@@ -11,7 +11,6 @@ import java.time.Instant;
 @Builder
 public class VoterSummaryResponse {
     private Long id;
-    private Long datasetId;
     private String voterId; // EPIC
     private Integer serialNo;
     private Integer partNo;

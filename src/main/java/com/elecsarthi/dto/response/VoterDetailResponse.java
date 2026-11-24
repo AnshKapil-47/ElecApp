@@ -12,7 +12,6 @@ import java.util.Map;
 @Builder
 public class VoterDetailResponse {
     private Long id;
-    private Long datasetId;
     private String voterId;
     private Integer serialNo;
     private String state;

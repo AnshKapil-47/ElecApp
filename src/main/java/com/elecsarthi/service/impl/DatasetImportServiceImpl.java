@@ -3,11 +3,9 @@ package com.elecsarthi.service.impl;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.DatasetUploadRequest;
 import com.elecsarthi.dto.response.DatasetDetailResponse;
-import com.elecsarthi.dto.response.ImportIssueResponse;
 import com.elecsarthi.entity.Dataset;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.ElectionTypeField;
-import com.elecsarthi.entity.ImportIssue;
 import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.DatasetStatus;
 import com.elecsarthi.enums.DatasetTier;
@@ -17,13 +15,12 @@ import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
+import com.elecsarthi.mapper.DatasetMapper;
 import com.elecsarthi.repository.DatasetRepository;
 import com.elecsarthi.repository.ElectionTypeFieldRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.ImportIssueRepository;
-import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuditService;
-import com.elecsarthi.service.CriteriaNormalizer;
 import com.elecsarthi.service.DatasetImportService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -40,569 +37,253 @@ import org.springframework.web.multipart.MultipartFile;
 import org.xml.sax.InputSource;
 import org.xml.sax.XMLReader;
 
-import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
+/**
+ * Imports an Excel voter roll into a new dataset: partitions are created, the workbook is streamed into
+ * them, and the dataset becomes IMPORTED only after the overlap probe passes. Any failure marks the dataset
+ * FAILED and drops its partitions, so the same file can be uploaded again.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DatasetImportServiceImpl implements DatasetImportService {
 
+    private static final int MASTER_RETENTION_DAYS = 60;
+    private static final int LONG_TERM_INITIAL_RETENTION_DAYS = 30;
+    private static final long STALE_PENDING_HOURS = 1;
+
     private final DatasetRepository datasetRepository;
     private final ElectionTypeRepository electionTypeRepository;
     private final ElectionTypeFieldRepository fieldRepository;
     private final ImportIssueRepository importIssueRepository;
-    private final CriteriaNormalizer criteriaNormalizer;
     private final AuditService auditService;
+    private final DatasetMapper datasetMapper;
     private final AppProperties appProperties;
     private final JdbcTemplate jdbcTemplate;
     private final Clock clock;
-
-    private static final int MAX_ISSUES = 200;
-    private static final int BATCH_SIZE = 1000;
-
-    private static final Set<String> CANONICAL_COLUMNS = Set.of(
-            "state", "district", "pc_no", "pc_name_en", "pc_name_mt",
-            "ac_no", "ac_name_en", "ac_name_mt", "part_no", "booth_no",
-            "booth_name_en", "booth_name_mt", "booth_address_en", "booth_address_mt",
-            "serial_no", "voter_id", "v_fname_en", "v_lname_en", "v_fname_mt", "v_lname_mt",
-            "vr_fname_en", "vr_lname_en", "vr_fname_mt", "vr_lname_mt",
-            "house_no", "house_location_en", "house_location_mt",
-            "section_no", "section_name_en", "section_name_mt",
-            "age", "sex", "rural_urban", "tehsil", "block", "pincode",
-            "municipal_name_nagar_nigam_en", "municipal_name_nagar_nigam_mt", "nagar_nigam_ward_no",
-            "municipal_name_nagar_palika_en", "municipal_name_nagar_palika_mt", "nagar_palika_ward_no",
-            "municipal_name_nagar_parishad_en", "municipal_name_nagar_parishad_mt", "nagar_parishad_ward_no",
-            "zilla_parishad_name_en", "zilla_parishad_name_mt", "zilla_parishad_name_ward_no",
-            "panchayat_samiti_name_en", "panchayat_samiti_name_mt", "panchayat_samiti_name_ward_no",
-            "panchayat_name_en", "panchayat_name_mt", "panchayat_no",
-            "mobile_no", "voter_image"
-    );
-
-    private static final Set<String> INT_COLUMNS = Set.of(
-            "pc_no", "ac_no", "part_no", "booth_no", "serial_no",
-            "section_no", "age", "nagar_nigam_ward_no", "nagar_palika_ward_no",
-            "nagar_parishad_ward_no", "zilla_parishad_name_ward_no",
-            "panchayat_samiti_name_ward_no", "panchayat_no"
-    );
 
     @Override
     public DatasetDetailResponse importDataset(MultipartFile file, DatasetUploadRequest request, Long callerUserId) {
         if (file == null || file.isEmpty()) {
             throw new BadRequestException("File is required.");
         }
-
         String originalFilename = file.getOriginalFilename();
         if (originalFilename == null || !originalFilename.toLowerCase().endsWith(".xlsx")) {
             throw new BadRequestException("Only .xlsx Excel files are supported.");
         }
-
-        ElectionType electionType = electionTypeRepository.findByCode(request.getElectionTypeCode())
+        electionTypeRepository.findByCode(request.getElectionTypeCode())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found: " + request.getElectionTypeCode()));
+        Dataset superseded = loadSupersedable(request.getSupersedesDatasetId());
 
-        // Validate superseded dataset existence and status BEFORE streaming
-        Dataset oldSuperseded = null;
-        if (request.getSupersedesDatasetId() != null) {
-            oldSuperseded = datasetRepository.findById(request.getSupersedesDatasetId())
-                    .orElseThrow(() -> new BadRequestException("Superseded dataset not found: " + request.getSupersedesDatasetId()));
-            if (oldSuperseded.getStatus() != DatasetStatus.IMPORTED) {
-                throw new ConflictException(ErrorCode.CONFLICT,
-                        "Cannot supersede dataset in status: " + oldSuperseded.getStatus());
-            }
-        }
-
-        // Save to temp file while computing SHA-256
-        File tempFile;
-        String fileSha256;
-        try {
-            tempFile = File.createTempFile("dataset-import-", ".xlsx");
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            try (InputStream in = file.getInputStream();
-                 DigestInputStream dis = new DigestInputStream(in, digest)) {
-                Files.copy(dis, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            }
-            fileSha256 = HexFormat.of().formatHex(digest.digest());
-        } catch (Exception e) {
-            throw new ApiException(ErrorCode.INTERNAL_SERVER_ERROR, "Failed to read upload file: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
-        }
-
+        Path tempFile = null;
         Dataset dataset = null;
-        Long datasetId = null;
-
         try {
-            // Check duplicate file hash across non-failed datasets; auto-clean stale PENDING (> 1 hr)
-            Optional<Dataset> existingDataset = datasetRepository.findByFileSha256AndStatusNot(fileSha256, DatasetStatus.FAILED);
-            if (existingDataset.isPresent()) {
-                Dataset ex = existingDataset.get();
-                if (ex.getStatus() == DatasetStatus.PENDING && ex.getCreatedAt().isBefore(clock.instant().minus(1, ChronoUnit.HOURS))) {
-                    log.warn("Stale PENDING dataset {} found for file hash {}. Cleaning up partitions and marking FAILED.", ex.getId(), fileSha256);
-                    try {
-                        jdbcTemplate.execute("SELECT detach_and_drop_dataset_partitions(" + ex.getId() + ");");
-                    } catch (Exception ignore) {}
-                    ex.setStatus(DatasetStatus.FAILED);
-                    datasetRepository.save(ex);
-                } else {
-                    throw new ConflictException(ErrorCode.FILE_ALREADY_EXISTS, "This file has already been imported (Dataset ID: " + ex.getId() + ").");
-                }
-            }
+            tempFile = Files.createTempFile("dataset-import-", ".xlsx");
+            String fileSha256 = copyAndHash(file, tempFile);
+            rejectDuplicateFile(fileSha256);
 
             Instant now = clock.instant();
-            // MASTER kept 60 days; LONG_TERM initial grace period is 30 days until entitlements sold
-            Instant deleteAfter = (request.getStorageTier() == DatasetTier.MASTER)
-                    ? now.plus(60, ChronoUnit.DAYS)
-                    : now.plus(30, ChronoUnit.DAYS);
-
-            dataset = Dataset.builder()
+            dataset = datasetRepository.save(Dataset.builder()
                     .name(request.getName().trim())
                     .originalFileName(originalFilename)
                     .fileSha256(fileSha256)
                     .storageTier(request.getStorageTier())
                     .status(DatasetStatus.PENDING)
                     .supersedesDatasetId(request.getSupersedesDatasetId())
-                    .deleteAfter(deleteAfter)
+                    .deleteAfter(now.plus(initialRetentionDays(request.getStorageTier()), ChronoUnit.DAYS))
                     .importedByUserId(callerUserId)
                     .createdAt(now)
-                    .build();
+                    .build());
+            Long datasetId = dataset.getId();
 
-            dataset = datasetRepository.save(dataset);
-            datasetId = dataset.getId();
-
-            // Create partitions
             jdbcTemplate.execute("SELECT create_dataset_partitions(" + datasetId + ");");
 
-            // Cross-lens text normalization.
-            // A dataset can be queried under multiple election types (lenses).
-            // Pre-normalize the union of all text filter and guard columns across all election types.
-            Set<String> textFilterColumns = new HashSet<>();
-            textFilterColumns.add("state");
-            textFilterColumns.add("district");
-            textFilterColumns.add("voter_id");
-            for (ElectionType et : electionTypeRepository.findAll()) {
-                if (et.getGuardColumn() != null && !et.getGuardColumn().isBlank()) {
-                    textFilterColumns.add(et.getGuardColumn().toLowerCase().trim());
-                }
-            }
-            List<ElectionTypeField> allFields = fieldRepository.findAll();
-            for (ElectionTypeField f : allFields) {
-                if (f.getUsage() == FieldUsage.FILTER && f.getSourceColumn() != null) {
-                    String col = f.getSourceColumn().toLowerCase().trim();
-                    if (!INT_COLUMNS.contains(col)) {
-                        textFilterColumns.add(col);
-                    }
-                }
-            }
+            VoterSheetHandler rows = new VoterSheetHandler(datasetId, textColumnsToNormalize(), jdbcTemplate, appProperties, now);
+            streamXlsx(tempFile, rows);
 
-            // Stream XLSX parsing and insert into voter_d<id>
-            VoterImportContext context = new VoterImportContext(datasetId, electionType, textFilterColumns);
-            streamXlsx(tempFile, context);
-
-            // Overlap probe on source_record_key_hash (exclude self and superseded dataset)
-            String overlapSql;
-            List<Object> overlapParams = new ArrayList<>();
-            overlapParams.add(request.getStorageTier().name());
-            overlapParams.add(datasetId);
-
-            if (request.getSupersedesDatasetId() != null) {
-                overlapSql = "SELECT d.id, d.name FROM voter_d" + datasetId + " n " +
-                        "JOIN dataset d ON d.storage_tier = ? AND d.status = 'IMPORTED' AND d.id <> ? AND d.id <> ? " +
-                        "JOIN voter o ON o.dataset_id = d.id AND o.source_record_key_hash = n.source_record_key_hash " +
-                        "LIMIT 1";
-                overlapParams.add(request.getSupersedesDatasetId());
-            } else {
-                overlapSql = "SELECT d.id, d.name FROM voter_d" + datasetId + " n " +
-                        "JOIN dataset d ON d.storage_tier = ? AND d.status = 'IMPORTED' AND d.id <> ? " +
-                        "JOIN voter o ON o.dataset_id = d.id AND o.source_record_key_hash = n.source_record_key_hash " +
-                        "LIMIT 1";
-            }
-
-            List<Map<String, Object>> overlaps = jdbcTemplate.queryForList(overlapSql, overlapParams.toArray());
-            if (!overlaps.isEmpty()) {
-                Long confId = ((Number) overlaps.get(0).get("id")).longValue();
-                String confName = (String) overlaps.get(0).get("name");
-                throw new ConflictException(ErrorCode.DATASET_OVERLAP, "Dataset voter records overlap with existing dataset ID " + confId + " (" + confName + ").");
-            }
-
-            // Create partition indexes
+            rejectOverlap(datasetId, request.getStorageTier(), request.getSupersedesDatasetId());
             jdbcTemplate.execute("SELECT create_dataset_indexes(" + datasetId + ");");
 
-            // Save import issues
-            if (!context.issues.isEmpty()) {
-                importIssueRepository.saveAll(context.issues);
+            importIssueRepository.saveAll(rows.issues());
+            if (superseded != null) {
+                superseded.setStatus(DatasetStatus.SUPERSEDED);
+                superseded.setSupersededAt(now);
+                datasetRepository.save(superseded);
             }
-
-            // Handle superseding if applicable
-            if (oldSuperseded != null) {
-                oldSuperseded.setStatus(DatasetStatus.SUPERSEDED);
-                oldSuperseded.setSupersededAt(now);
-                datasetRepository.save(oldSuperseded);
-            }
-
-            // Update completed dataset
             dataset.setStatus(DatasetStatus.IMPORTED);
-            dataset.setTotalRows(context.totalRows);
-            dataset.setImportedRows(context.importedRows);
-            dataset.setFailedRows(context.failedRows);
-            dataset.setStates(new ArrayList<>(context.states));
+            dataset.setTotalRows(rows.totalRows());
+            dataset.setImportedRows(rows.importedRows());
+            dataset.setFailedRows(rows.failedRows());
+            dataset.setStates(rows.states());
             dataset.setCompletedAt(clock.instant());
             dataset = datasetRepository.save(dataset);
 
             auditService.log(callerUserId, null, datasetId, null, "DATASET_IMPORT", AuditOutcome.SUCCESS,
-                    "dataset", datasetId.toString(), "{\"rows\":" + context.importedRows + ",\"tier\":\"" + request.getStorageTier() + "\"}", null);
+                    "dataset", datasetId.toString(),
+                    "{\"rows\":" + rows.importedRows() + ",\"tier\":\"" + request.getStorageTier() + "\"}", null);
 
-            return mapToDetailResponse(dataset, context.issues);
-
+            return datasetMapper.toDetailResponse(dataset, rows.issues());
         } catch (Exception e) {
-            log.error("Dataset import failed for datasetId={}", datasetId, e);
-            // Clean up failed dataset partition immediately so file is not locked permanently
-            if (dataset != null && dataset.getId() != null) {
-                try {
-                    dataset.setStatus(DatasetStatus.FAILED);
-                    datasetRepository.save(dataset);
-                    jdbcTemplate.execute("SELECT detach_and_drop_dataset_partitions(" + dataset.getId() + ");");
-                    log.info("Cleaned up partitions for failed dataset {}", dataset.getId());
-                } catch (Exception cleanupEx) {
-                    log.error("Failed to clean up partitions for dataset {}", dataset.getId(), cleanupEx);
-                }
+            discardFailedDataset(dataset);
+            if (e instanceof ApiException apiException) {
+                log.warn("Dataset import rejected: {}", apiException.getMessage());
+                throw apiException;
             }
-            if (e instanceof ApiException apiEx) {
-                throw apiEx;
-            }
-            throw new ApiException(ErrorCode.INTERNAL_SERVER_ERROR, "Dataset import failed: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+            log.error("Dataset import failed for datasetId={}", dataset == null ? null : dataset.getId(), e);
+            throw new ApiException(ErrorCode.INTERNAL_SERVER_ERROR, "Dataset import failed.", HttpStatus.INTERNAL_SERVER_ERROR);
         } finally {
-            tempFile.delete();
+            deleteQuietly(tempFile);
         }
     }
 
-    private void streamXlsx(File file, VoterImportContext context) throws Exception {
-        try (OPCPackage opc = OPCPackage.open(file)) {
+    /** A superseded dataset must exist and still be IMPORTED; checked before the file is streamed. */
+    private Dataset loadSupersedable(Long supersedesDatasetId) {
+        if (supersedesDatasetId == null) {
+            return null;
+        }
+        Dataset old = datasetRepository.findById(supersedesDatasetId)
+                .orElseThrow(() -> new BadRequestException("Superseded dataset not found: " + supersedesDatasetId));
+        if (old.getStatus() != DatasetStatus.IMPORTED) {
+            throw new ConflictException(ErrorCode.CONFLICT, "Cannot supersede dataset in status: " + old.getStatus());
+        }
+        return old;
+    }
+
+    private String copyAndHash(MultipartFile file, Path target) throws IOException, NoSuchAlgorithmException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream in = new DigestInputStream(file.getInputStream(), digest)) {
+            Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    /**
+     * The same file may be imported only once. A PENDING dataset older than an hour is an abandoned import:
+     * its partitions are dropped and it is marked FAILED so the file can be retried.
+     */
+    private void rejectDuplicateFile(String fileSha256) {
+        Optional<Dataset> existing = datasetRepository.findByFileSha256AndStatusNot(fileSha256, DatasetStatus.FAILED);
+        if (existing.isEmpty()) {
+            return;
+        }
+        Dataset stale = existing.get();
+        boolean abandoned = stale.getStatus() == DatasetStatus.PENDING
+                && stale.getCreatedAt().isBefore(clock.instant().minus(STALE_PENDING_HOURS, ChronoUnit.HOURS));
+        if (!abandoned) {
+            throw new ConflictException(ErrorCode.FILE_ALREADY_EXISTS,
+                    "This file has already been imported (Dataset ID: " + stale.getId() + ").");
+        }
+        log.warn("Abandoned PENDING dataset {} found for the same file; dropping its partitions", stale.getId());
+        discardFailedDataset(stale);
+    }
+
+    private static int initialRetentionDays(DatasetTier tier) {
+        return tier == DatasetTier.MASTER ? MASTER_RETENTION_DAYS : LONG_TERM_INITIAL_RETENTION_DAYS;
+    }
+
+    /**
+     * A dataset can be queried through any election type, so every text column that any type filters or
+     * guards on is normalized at import time (the same way criteria are normalized when a sale is made).
+     */
+    private Set<String> textColumnsToNormalize() {
+        Set<String> columns = new HashSet<>(Set.of("state", "district", "voter_id"));
+        for (ElectionType electionType : electionTypeRepository.findAll()) {
+            String guard = electionType.getGuardColumn();
+            if (guard != null && !guard.isBlank()) {
+                columns.add(guard.toLowerCase().trim());
+            }
+        }
+        for (ElectionTypeField field : fieldRepository.findAll()) {
+            if (field.getUsage() == FieldUsage.FILTER && field.getSourceColumn() != null) {
+                String column = field.getSourceColumn().toLowerCase().trim();
+                if (!VoterSheetHandler.INT_COLUMNS.contains(column)) {
+                    columns.add(column);
+                }
+            }
+        }
+        return columns;
+    }
+
+    private void streamXlsx(Path file, VoterSheetHandler rows) throws Exception {
+        try (OPCPackage opc = OPCPackage.open(file.toFile())) {
             XSSFReader reader = new XSSFReader(opc);
             StylesTable styles = reader.getStylesTable();
-            SharedStringsTable sst = (SharedStringsTable) reader.getSharedStringsTable();
+            SharedStringsTable sharedStrings = (SharedStringsTable) reader.getSharedStringsTable();
             XMLReader parser = XMLHelper.newXMLReader();
+            parser.setContentHandler(new XSSFSheetXMLHandler(styles, sharedStrings, rows, false));
 
-            VoterSheetHandler sheetHandler = new VoterSheetHandler(context, jdbcTemplate, appProperties);
-            XSSFSheetXMLHandler handler = new XSSFSheetXMLHandler(styles, sst, sheetHandler, false);
-            parser.setContentHandler(handler);
-
-            // Iterate over all sheets in the workbook (multi-sheet support)
             Iterator<InputStream> sheets = reader.getSheetsData();
-            int sheetIndex = 0;
-            while (sheets.hasNext()) {
-                sheetIndex++;
-                try (InputStream sheetStream = sheets.next()) {
-                    sheetHandler.startNewSheet("Sheet" + sheetIndex);
-                    parser.parse(new InputSource(sheetStream));
+            for (int sheetNo = 1; sheets.hasNext(); sheetNo++) {
+                try (InputStream sheet = sheets.next()) {
+                    rows.startNewSheet("Sheet" + sheetNo);
+                    parser.parse(new InputSource(sheet));
                 }
             }
-            sheetHandler.flushRemaining();
+            rows.finish();
         }
     }
 
-    private DatasetDetailResponse mapToDetailResponse(Dataset d, List<ImportIssue> issues) {
-        List<ImportIssueResponse> issueResponses = issues.stream()
-                .map(i -> ImportIssueResponse.builder()
-                        .id(i.getId())
-                        .sheet(i.getSheet())
-                        .rowNo(i.getRowNo())
-                        .columnName(i.getColumnName())
-                        .issueCode(i.getIssueCode())
-                        .issueDetail(i.getIssueDetail())
-                        .createdAt(i.getCreatedAt())
-                        .build())
-                .collect(Collectors.toList());
-
-        return DatasetDetailResponse.builder()
-                .id(d.getId())
-                .name(d.getName())
-                .originalFileName(d.getOriginalFileName())
-                .fileSha256(d.getFileSha256())
-                .storageTier(d.getStorageTier())
-                .status(d.getStatus())
-                .states(d.getStates())
-                .supersedesDatasetId(d.getSupersedesDatasetId())
-                .supersededAt(d.getSupersededAt())
-                .deleteAfter(d.getDeleteAfter())
-                .totalRows(d.getTotalRows())
-                .importedRows(d.getImportedRows())
-                .failedRows(d.getFailedRows())
-                .importedByUserId(d.getImportedByUserId())
-                .createdAt(d.getCreatedAt())
-                .completedAt(d.getCompletedAt())
-                .issues(issueResponses)
-                .build();
-    }
-
-    private static class VoterImportContext {
-        final Long datasetId;
-        final ElectionType electionType;
-        final Set<String> textFilterColumns;
-        final Set<String> states = new HashSet<>();
-        final List<ImportIssue> issues = new ArrayList<>();
-        int totalRows = 0;
-        int importedRows = 0;
-        int failedRows = 0;
-
-        VoterImportContext(Long datasetId, ElectionType electionType, Set<String> textFilterColumns) {
-            this.datasetId = datasetId;
-            this.electionType = electionType;
-            this.textFilterColumns = textFilterColumns;
-        }
-
-        void addIssue(String sheet, int rowNo, String col, String code, String detail) {
-            if (issues.size() < MAX_ISSUES) {
-                issues.add(ImportIssue.builder()
-                        .datasetId(datasetId)
-                        .sheet(sheet)
-                        .rowNo(rowNo)
-                        .columnName(col)
-                        .issueCode(code)
-                        .issueDetail(detail)
-                        .createdAt(Instant.now())
-                        .build());
-            }
+    /**
+     * A voter record (identified by source_record_key_hash) may exist in only one IMPORTED dataset of a tier.
+     * The dataset being superseded is excluded, because a correction legitimately repeats its records.
+     */
+    private void rejectOverlap(Long datasetId, DatasetTier tier, Long supersedesDatasetId) {
+        String sql = "SELECT d.id, d.name FROM voter_d" + datasetId + " n "
+                + "JOIN dataset d ON d.storage_tier = ? AND d.status = 'IMPORTED' AND d.id <> ? "
+                + (supersedesDatasetId != null ? "AND d.id <> ? " : "")
+                + "JOIN voter o ON o.dataset_id = d.id AND o.source_record_key_hash = n.source_record_key_hash "
+                + "LIMIT 1";
+        Object[] params = supersedesDatasetId != null
+                ? new Object[]{tier.name(), datasetId, supersedesDatasetId}
+                : new Object[]{tier.name(), datasetId};
+        List<Map<String, Object>> overlaps = jdbcTemplate.queryForList(sql, params);
+        if (!overlaps.isEmpty()) {
+            Map<String, Object> conflict = overlaps.get(0);
+            throw new ConflictException(ErrorCode.DATASET_OVERLAP,
+                    "Dataset voter records overlap with existing dataset ID " + conflict.get("id") + " (" + conflict.get("name") + ").");
         }
     }
 
-    private static class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
-
-        private final VoterImportContext ctx;
-        private final JdbcTemplate jdbcTemplate;
-        private final AppProperties appProperties;
-        private final byte[] mobileAesKey;
-
-        private final Map<Integer, String> headerMap = new HashMap<>();
-        private final Map<String, String> currentRow = new HashMap<>();
-        private final List<Object[]> batchArgs = new ArrayList<>();
-        private int currentRowNum = -1;
-        private String currentSheetName = "Sheet1";
-
-        VoterSheetHandler(VoterImportContext ctx, JdbcTemplate jdbcTemplate, AppProperties appProperties) {
-            this.ctx = ctx;
-            this.jdbcTemplate = jdbcTemplate;
-            this.appProperties = appProperties;
-            this.mobileAesKey = HexFormat.of().parseHex(appProperties.getSecurity().getVoterMobileAesKeyHex());
+    /** Marks the dataset FAILED and drops its partitions immediately so the file is not locked out. */
+    private void discardFailedDataset(Dataset dataset) {
+        if (dataset == null || dataset.getId() == null) {
+            return;
         }
-
-        void startNewSheet(String sheetName) {
-            this.currentSheetName = sheetName;
-            this.headerMap.clear();
-            this.currentRow.clear();
-            this.currentRowNum = -1;
+        try {
+            dataset.setStatus(DatasetStatus.FAILED);
+            datasetRepository.save(dataset);
+            jdbcTemplate.execute("SELECT detach_and_drop_dataset_partitions(" + dataset.getId() + ");");
+        } catch (Exception cleanupFailure) {
+            log.error("Failed to clean up partitions for dataset {}", dataset.getId(), cleanupFailure);
         }
+    }
 
-        @Override
-        public void startRow(int rowNum) {
-            currentRowNum = rowNum;
-            currentRow.clear();
+    private static void deleteQuietly(Path file) {
+        if (file == null) {
+            return;
         }
-
-        @Override
-        public void cell(String cellReference, String formattedValue, org.apache.poi.xssf.usermodel.XSSFComment comment) {
-            if (formattedValue == null) return;
-            String val = formattedValue.trim();
-            if (val.isEmpty()) return;
-
-            int colIdx = getColumnIndex(cellReference);
-
-            if (currentRowNum == 0) {
-                // Header row
-                String canonical = val.toLowerCase().replace(" ", "_");
-                if (CANONICAL_COLUMNS.contains(canonical)) {
-                    headerMap.put(colIdx, canonical);
-                }
-            } else {
-                String colName = headerMap.get(colIdx);
-                if (colName != null) {
-                    currentRow.put(colName, val);
-                }
-            }
-        }
-
-        @Override
-        public void endRow(int rowNum) {
-            if (rowNum == 0) return; // Header finished
-
-            ctx.totalRows++;
-
-            // Normalize text filter and guard columns with CriteriaNormalizer.normalizeText
-            for (String col : ctx.textFilterColumns) {
-                String val = currentRow.get(col);
-                if (val != null) {
-                    currentRow.put(col, CriteriaNormalizer.normalizeText(val));
-                }
-            }
-
-            String state = currentRow.getOrDefault("state", "");
-            String district = currentRow.getOrDefault("district", "");
-            String acNoStr = currentRow.get("ac_no");
-            String partNoStr = currentRow.get("part_no");
-            String boothNoStr = currentRow.get("booth_no");
-            String serialNoStr = currentRow.get("serial_no");
-            String voterId = currentRow.getOrDefault("voter_id", "");
-
-            if (state.isEmpty() || serialNoStr == null || voterId.isEmpty()) {
-                ctx.failedRows++;
-                ctx.addIssue(currentSheetName, rowNum, "voter_id", "MISSING_REQUIRED_FIELD", "Missing required identification field at row " + rowNum);
-                return;
-            }
-
-            ctx.states.add(state);
-
-            // Compute source_record_key_hash: SHA-256 of state|district|ac_no|part_no|booth_no|serial_no|voter_id
-            String keyStr = String.format("%s|%s|%s|%s|%s|%s|%s",
-                    state, district,
-                    acNoStr != null ? acNoStr.trim() : "",
-                    partNoStr != null ? partNoStr.trim() : "",
-                    boothNoStr != null ? boothNoStr.trim() : "",
-                    serialNoStr.trim(), voterId);
-            String sourceKeyHash = CryptoUtils.sha256Hex(keyStr);
-
-            // Mobile encryption
-            byte[] mobileEnc = null;
-            Short mobileKeyVer = null;
-            String mobileNo = currentRow.get("mobile_no");
-            if (mobileNo != null && !mobileNo.isBlank()) {
-                try {
-                    mobileEnc = CryptoUtils.aesGcmEncrypt(mobileNo.trim().getBytes(), mobileAesKey);
-                    mobileKeyVer = (short) appProperties.getSecurity().getVoterMobileKeyVersion();
-                } catch (Exception e) {
-                    ctx.addIssue(currentSheetName, rowNum, "mobile_no", "ENCRYPTION_FAILED", "Failed to encrypt mobile at row " + rowNum);
-                }
-            }
-
-            Object[] rowValues = new Object[]{
-                    ctx.datasetId,
-                    sourceKeyHash,
-                    state,
-                    district.isEmpty() ? null : district,
-                    parseInteger(currentRow.get("pc_no")),
-                    currentRow.get("pc_name_en"),
-                    currentRow.get("pc_name_mt"),
-                    parseInteger(acNoStr),
-                    currentRow.get("ac_name_en"),
-                    currentRow.get("ac_name_mt"),
-                    parseInteger(partNoStr),
-                    parseInteger(boothNoStr),
-                    currentRow.get("booth_name_en"),
-                    currentRow.get("booth_name_mt"),
-                    currentRow.get("booth_address_en"),
-                    currentRow.get("booth_address_mt"),
-                    parseInteger(serialNoStr),
-                    voterId,
-                    currentRow.get("v_fname_en"),
-                    currentRow.get("v_lname_en"),
-                    currentRow.get("v_fname_mt"),
-                    currentRow.get("v_lname_mt"),
-                    currentRow.get("vr_fname_en"),
-                    currentRow.get("vr_lname_en"),
-                    currentRow.get("vr_fname_mt"),
-                    currentRow.get("vr_lname_mt"),
-                    currentRow.get("house_no"),
-                    currentRow.get("house_location_en"),
-                    currentRow.get("house_location_mt"),
-                    parseInteger(currentRow.get("section_no")),
-                    currentRow.get("section_name_en"),
-                    currentRow.get("section_name_mt"),
-                    parseInteger(currentRow.get("age")),
-                    currentRow.get("sex"),
-                    currentRow.get("rural_urban"),
-                    currentRow.get("tehsil"),
-                    currentRow.get("block"),
-                    currentRow.get("pincode"),
-                    currentRow.get("municipal_name_nagar_nigam_en"),
-                    currentRow.get("municipal_name_nagar_nigam_mt"),
-                    parseInteger(currentRow.get("nagar_nigam_ward_no")),
-                    currentRow.get("municipal_name_nagar_palika_en"),
-                    currentRow.get("municipal_name_nagar_palika_mt"),
-                    parseInteger(currentRow.get("nagar_palika_ward_no")),
-                    currentRow.get("municipal_name_nagar_parishad_en"),
-                    currentRow.get("municipal_name_nagar_parishad_mt"),
-                    parseInteger(currentRow.get("nagar_parishad_ward_no")),
-                    currentRow.get("zilla_parishad_name_en"),
-                    currentRow.get("zilla_parishad_name_mt"),
-                    parseInteger(currentRow.get("zilla_parishad_name_ward_no")),
-                    currentRow.get("panchayat_samiti_name_en"),
-                    currentRow.get("panchayat_samiti_name_mt"),
-                    parseInteger(currentRow.get("panchayat_samiti_name_ward_no")),
-                    currentRow.get("panchayat_name_en"),
-                    currentRow.get("panchayat_name_mt"),
-                    parseInteger(currentRow.get("panchayat_no")),
-                    mobileEnc,
-                    mobileKeyVer,
-                    null // voter_image
-            };
-
-            batchArgs.add(rowValues);
-            ctx.importedRows++;
-
-            if (batchArgs.size() >= BATCH_SIZE) {
-                flushBatch();
-            }
-        }
-
-        private void flushBatch() {
-            if (batchArgs.isEmpty()) return;
-
-            String sql = "INSERT INTO voter_d" + ctx.datasetId + " (" +
-                    "dataset_id, source_record_key_hash, state, district, pc_no, pc_name_en, pc_name_mt, " +
-                    "ac_no, ac_name_en, ac_name_mt, part_no, booth_no, booth_name_en, booth_name_mt, " +
-                    "booth_address_en, booth_address_mt, serial_no, voter_id, v_fname_en, v_lname_en, " +
-                    "v_fname_mt, v_lname_mt, vr_fname_en, vr_lname_en, vr_fname_mt, vr_lname_mt, " +
-                    "house_no, house_location_en, house_location_mt, section_no, section_name_en, " +
-                    "section_name_mt, age, sex, rural_urban, tehsil, block, pincode, " +
-                    "municipal_name_nagar_nigam_en, municipal_name_nagar_nigam_mt, nagar_nigam_ward_no, " +
-                    "municipal_name_nagar_palika_en, municipal_name_nagar_palika_mt, nagar_palika_ward_no, " +
-                    "municipal_name_nagar_parishad_en, municipal_name_nagar_parishad_mt, nagar_parishad_ward_no, " +
-                    "zilla_parishad_name_en, zilla_parishad_name_mt, zilla_parishad_name_ward_no, " +
-                    "panchayat_samiti_name_en, panchayat_samiti_name_mt, panchayat_samiti_name_ward_no, " +
-                    "panchayat_name_en, panchayat_name_mt, panchayat_no, mobile_no_enc, mobile_key_version, voter_image_ref" +
-                    ") VALUES (" +
-                    String.join(",", Collections.nCopies(59, "?")) + ")";
-
-            jdbcTemplate.batchUpdate(sql, batchArgs);
-            batchArgs.clear();
-        }
-
-        void flushRemaining() {
-            flushBatch();
-        }
-
-        private Integer parseInteger(String val) {
-            if (val == null || val.isBlank()) return null;
-            try {
-                // If value is numeric string like "12.0", truncate decimal
-                if (val.contains(".")) {
-                    val = val.substring(0, val.indexOf('.'));
-                }
-                return Integer.parseInt(val.trim());
-            } catch (Exception e) {
-                return null;
-            }
-        }
-
-        private int getColumnIndex(String cellRef) {
-            StringBuilder colStr = new StringBuilder();
-            for (char c : cellRef.toCharArray()) {
-                if (Character.isLetter(c)) {
-                    colStr.append(c);
-                } else {
-                    break;
-                }
-            }
-            int index = 0;
-            for (int i = 0; i < colStr.length(); i++) {
-                index = index * 26 + (Character.toUpperCase(colStr.charAt(i)) - 'A' + 1);
-            }
-            return index - 1;
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException e) {
+            log.warn("Could not delete temporary import file {}", file);
         }
     }
 }

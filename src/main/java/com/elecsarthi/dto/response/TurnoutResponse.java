@@ -11,7 +11,6 @@ import java.time.Instant;
 @AllArgsConstructor
 @Builder
 public class TurnoutResponse {
-    private Long datasetId;
     private Long customerAccountId;
     private Long voterRowId;
     private boolean voted;
