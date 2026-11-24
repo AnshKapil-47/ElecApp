@@ -17,6 +17,7 @@ import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
+import com.elecsarthi.mapper.CustomerMapper;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.UserSessionRepository;
@@ -46,6 +47,7 @@ public class CustomerServiceImpl implements CustomerService {
     private final AppUserRepository userRepository;
     private final UserSessionRepository sessionRepository;
     private final AuditService auditService;
+    private final CustomerMapper customerMapper;
     private final AppProperties appProperties;
     private final Clock clock;
 
@@ -307,17 +309,7 @@ public class CustomerServiceImpl implements CustomerService {
                     .orElse(null);
         }
 
-        return CustomerSummaryResponse.builder()
-                .id(c.getId())
-                .customerName(c.getCustomerName())
-                .partyOrOrgName(c.getPartyOrOrgName())
-                .contactPhone(maskPhone(c.getContactPhone(), callerRole))
-                .status(c.getStatus())
-                .activationStatus(c.getActivationStatus())
-                .owningAgentUserId(c.getOwningAgentUserId())
-                .owningAgentName(agentName)
-                .createdAt(c.getCreatedAt())
-                .build();
+        return customerMapper.toSummaryResponse(c, agentName, maskPhone(c.getContactPhone(), callerRole));
     }
 
     private CustomerDetailResponse mapToDetail(CustomerAccount c, Role callerRole) {
@@ -328,22 +320,6 @@ public class CustomerServiceImpl implements CustomerService {
                     .orElse(null);
         }
 
-        return CustomerDetailResponse.builder()
-                .id(c.getId())
-                .customerName(c.getCustomerName())
-                .partyOrOrgName(c.getPartyOrOrgName())
-                .contactPhone(maskPhone(c.getContactPhone(), callerRole))
-                .contactEmail(c.getContactEmail())
-                .status(c.getStatus())
-                .activationStatus(c.getActivationStatus())
-                .owningAgentUserId(c.getOwningAgentUserId())
-                .owningAgentName(agentName)
-                .createdByUserId(c.getCreatedByUserId())
-                .activatedAt(c.getActivatedAt())
-                .suspendedAt(c.getSuspendedAt())
-                .suspensionReason(c.getSuspensionReason())
-                .mobileAccessPolicyVersion(c.getMobileAccessPolicyVersion())
-                .createdAt(c.getCreatedAt())
-                .build();
+        return customerMapper.toDetailResponse(c, agentName, maskPhone(c.getContactPhone(), callerRole));
     }
 }

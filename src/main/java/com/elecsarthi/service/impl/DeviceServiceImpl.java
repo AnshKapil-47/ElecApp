@@ -20,6 +20,7 @@ import com.elecsarthi.repository.DeviceNonceRepository;
 import com.elecsarthi.repository.UserDeviceRepository;
 import com.elecsarthi.repository.UserSessionRepository;
 import com.elecsarthi.security.device.CryptoUtils;
+import com.elecsarthi.security.signing.DeviceSignatureVerifier;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.DeviceService;
 import org.springframework.http.HttpStatus;
@@ -42,6 +43,7 @@ public class DeviceServiceImpl implements DeviceService {
     private final AppUserRepository userRepository;
     private final UserSessionRepository sessionRepository;
     private final DeviceNonceRepository nonceRepository;
+    private final DeviceSignatureVerifier deviceSignatureVerifier;
     private final AuditService auditService;
     private final AppProperties appProperties;
     private final Clock clock;
@@ -51,6 +53,7 @@ public class DeviceServiceImpl implements DeviceService {
                              AppUserRepository userRepository,
                              UserSessionRepository sessionRepository,
                              DeviceNonceRepository nonceRepository,
+                             DeviceSignatureVerifier deviceSignatureVerifier,
                              AuditService auditService,
                              AppProperties appProperties,
                              Clock clock) {
@@ -58,6 +61,7 @@ public class DeviceServiceImpl implements DeviceService {
         this.userRepository = userRepository;
         this.sessionRepository = sessionRepository;
         this.nonceRepository = nonceRepository;
+        this.deviceSignatureVerifier = deviceSignatureVerifier;
         this.auditService = auditService;
         this.appProperties = appProperties;
         this.clock = clock;
@@ -140,7 +144,7 @@ public class DeviceServiceImpl implements DeviceService {
         // Verify ECDSA signature
         // Challenge data is the raw challenge bytes hashed, or raw bytes matching the stored hash
         // The signature is verified against the public key
-        boolean signatureValid = CryptoUtils.verifyEcdsaP256Signature(
+        boolean signatureValid = deviceSignatureVerifier.verifySignature(
                 pendingDevice.getPublicKey(),
                 pendingDevice.getChallengeHash().getBytes(StandardCharsets.UTF_8),
                 request.getChallengeSignature()

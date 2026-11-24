@@ -47,10 +47,12 @@ elecsarthi-claude-kit/
 │   ├── ElecSarthi_ER_Diagram.md / .png / .svg   ← the data model (18 tables)
 │   ├── NEW_APP_COLUMN_DETAILS.xlsx              ← your column sheet (skin = FILTER, green = DISPLAY)
 │   └── election_type_field_seed.csv             ← generated from the sheet (271 rows)
-├── backend/src/main/resources/db/migration/
-│   ├── V1__elecsarthi_schema.sql          ← schema
-│   ├── V2__runtime_role.sql               ← least-privilege runtime DB role
-│   └── V3__seed_election_type_field.sql   ← field configuration from the sheet
+├── src/main/resources/db/migration/
+│   ├── V1__elecsarthi_schema.sql                  ← schema (18 tables, exclusion constraints, partitions)
+│   ├── V2__runtime_role.sql                       ← least-privilege runtime DB role (elecsarthi_app)
+│   ├── V3__seed_election_type_field.sql           ← field configuration from the sheet (271 rows)
+│   ├── V4__add_missing_indexes_and_constraints.sql ← performance indexes & foreign key cascades
+│   └── V5__remove_legacy_customer_admin_role.sql  ← canonical 5-role enforcement & SECURITY DEFINER partition funcs
 └── tools/
     ├── db/run_tests.sh, db/test_schema.sql            ← 76 schema checks (all pass on PostgreSQL 16.15)
     ├── seed/gen_seed.py, seed/csv_to_migration.py     ← Excel → CSV → migration
@@ -143,4 +145,6 @@ Hooks and permission rules are enforced by Claude Code itself; `CLAUDE.md` and t
 - When a business rule changes, update `.claude/rules/business-rules.md` **and** `docs/data-model/ElecSarthi_ER_Diagram.md` in the same commit.
 - When the Excel changes, always go through `/seed-fields`, so you get a new migration and never edit an applied one.
 - Make the GitHub repository private before real data, keys or production paths exist, and keep secrets in a secret manager.
-- Backend target is Spring Boot 4.1.x on Java 21: Spring Boot 3.4 and 3.5 no longer receive open-source security fixes.
+- Backend target is Spring Boot 4.2.0 on Java 25 LTS with PostgreSQL 18.3.
+- Canonical 5 roles strictly enforced: OWNER, SUBOWNER, AGENT, CUSTOMER, SUBUSER.
+- Complete test suite verified: 79/79 schema tests pass; 37/37 integration tests pass.

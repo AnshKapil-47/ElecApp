@@ -5,17 +5,24 @@ import com.elecsarthi.dto.response.DatasetDetailResponse;
 import com.elecsarthi.dto.response.ElectionTypeFieldResponse;
 import com.elecsarthi.dto.response.ElectionTypeResponse;
 import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
+import com.elecsarthi.entity.Dataset;
 import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.DatasetStatus;
 import com.elecsarthi.enums.DatasetTier;
 import com.elecsarthi.enums.ElectionTypeCode;
+import com.elecsarthi.enums.EntitlementSource;
+import com.elecsarthi.enums.EntitlementStatus;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.DatasetRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
+import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.service.CriteriaNormalizer;
 import com.elecsarthi.service.DatasetImportService;
 import com.elecsarthi.service.DatasetService;
@@ -35,6 +42,8 @@ import org.springframework.test.context.ActiveProfiles;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +70,12 @@ public class DatasetServiceIntegrationTest {
 
     @Autowired
     private DatasetRepository datasetRepository;
+
+    @Autowired
+    private EntitlementRepository entitlementRepository;
+
+    @Autowired
+    private CustomerAccountRepository customerAccountRepository;
 
     @Autowired
     private AppUserRepository userRepository;
@@ -203,6 +218,88 @@ public class DatasetServiceIntegrationTest {
                 "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'voter_d" + datasetId + "')",
                 Boolean.class);
         assertFalse(tableExists != null && tableExists, "Partition table voter_d" + datasetId + " must be dropped");
+    }
+
+    @Test
+    @DisplayName("Dataset deletion: Rejects deletion if active entitlement exists")
+    void testDatasetDeletionRejectedWithActiveEntitlement() throws IOException {
+        byte[] xlsxBytes = createSampleVoterXlsx(2);
+        MockMultipartFile file = new MockMultipartFile("file", "voters_ent.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", xlsxBytes);
+
+        DatasetUploadRequest req = DatasetUploadRequest.builder()
+                .name("With Entitlement")
+                .electionTypeCode(ElectionTypeCode.VIDHAN_SABHA)
+                .storageTier(DatasetTier.MASTER)
+                .build();
+
+        DatasetDetailResponse resp = datasetImportService.importDataset(file, req, owner.getId());
+        Long datasetId = resp.getId();
+
+        CustomerAccount customer = customerAccountRepository.save(CustomerAccount.builder()
+                .customerName("Acme Corp")
+                .contactPhone("+919811122233")
+                .createdByUserId(owner.getId())
+                .status(UserStatus.ACTIVE)
+                .build());
+
+        Instant now = Instant.now();
+        entitlementRepository.save(Entitlement.builder()
+                .customerAccountId(customer.getId())
+                .electionTypeId((short) 2)
+                .datasetId(datasetId)
+                .storageTier(DatasetTier.MASTER)
+                .criteria("{\"ac_no\":10,\"state\":\"HARYANA\"}")
+                .criteriaHash("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .scopeLabel("HARYANA AC 10")
+                .source(EntitlementSource.DIRECT)
+                .status(EntitlementStatus.ACTIVE)
+                .validFrom(now.minusSeconds(3600))
+                .validUntil(now.plusSeconds(86400 * 30))
+                .createdByUserId(owner.getId())
+                .createdAt(now)
+                .build());
+
+        ConflictException ex = assertThrows(ConflictException.class, () ->
+                datasetService.deleteDataset(datasetId, owner.getId()));
+        assertEquals(409, ex.getStatus().value());
+    }
+
+    @Test
+    @DisplayName("Dataset deletion: Rejects deletion if dataset is already DELETING")
+    void testDatasetDeletionWhenAlreadyDeleting() {
+        Dataset dataset = datasetRepository.save(Dataset.builder()
+                .name("Already Deleting")
+                .originalFileName("deleting.xlsx")
+                .fileSha256("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+                .storageTier(DatasetTier.MASTER)
+                .status(DatasetStatus.DELETING)
+                .deleteAfter(Instant.now().plus(60, ChronoUnit.DAYS))
+                .importedByUserId(owner.getId())
+                .createdAt(Instant.now())
+                .build());
+
+        ConflictException ex = assertThrows(ConflictException.class, () ->
+                datasetService.deleteDataset(dataset.getId(), owner.getId()));
+        assertEquals(409, ex.getStatus().value());
+    }
+
+    @Test
+    @DisplayName("Dataset deletion: Handles safely when partition table is already missing")
+    void testDatasetDeletionWithMissingPartitions() {
+        Dataset dataset = datasetRepository.save(Dataset.builder()
+                .name("Missing Partitions")
+                .originalFileName("missing.xlsx")
+                .fileSha256("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+                .storageTier(DatasetTier.MASTER)
+                .status(DatasetStatus.IMPORTED)
+                .deleteAfter(Instant.now().plus(60, ChronoUnit.DAYS))
+                .importedByUserId(owner.getId())
+                .createdAt(Instant.now())
+                .build());
+
+        assertDoesNotThrow(() -> datasetService.deleteDataset(dataset.getId(), owner.getId()));
+        assertFalse(datasetRepository.findById(dataset.getId()).isPresent());
     }
 
     private byte[] createSampleVoterXlsx(int numRows) throws IOException {

@@ -1,8 +1,8 @@
 spring:
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USER:elecsarthi_app}
-    password: ${DB_PASSWORD}
+    url: ${SPRING_DATASOURCE_URL:${DB_URL:jdbc:postgresql://localhost:5432/elecsarthi_db}}
+    username: ${SPRING_DATASOURCE_USERNAME:${DB_USER:elecsarthi_app}}
+    password: ${SPRING_DATASOURCE_PASSWORD:${DB_PASSWORD}}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 50
@@ -17,24 +17,25 @@ spring:
 server:
   port: ${PORT:8080}
   ssl:
-    enabled: ${SSL_ENABLED:true}
+    enabled: ${SSL_ENABLED:false} # Defaults to false when TLS is terminated at reverse proxy (TLS Option B)
+  forward-headers-strategy: native
 
 elecsarthi:
   mobile-numbers-enabled: ${MOBILE_NUMBERS_ENABLED:false}
   jwt:
     issuer: elecsarthi-auth
-    secret: ${JWT_SECRET}
+    secret: ${ELECSARTHI_JWT_SECRET:${JWT_SECRET}}
     access-token-expiration-minutes: 15
     refresh-token-expiration-days: 30
     session-absolute-expiration-days: 90
     web-idle-expiration-minutes: 30
     web-absolute-expiration-hours: 12
   security:
-    activation-pepper: ${ACTIVATION_PEPPER}
-    ed25519-private-key-hex: ${ED25519_PRIVATE_KEY_HEX}
-    ed25519-key-version: ${ED25519_KEY_VERSION:1}
-    voter-mobile-aes-key-hex: ${VOTER_MOBILE_AES_KEY_HEX}
-    voter-mobile-key-version: ${VOTER_MOBILE_KEY_VERSION:1}
+    activation-pepper: ${ELECSARTHI_SECURITY_ACTIVATION_PEPPER:${ACTIVATION_PEPPER}}
+    ed25519-private-key-hex: ${ELECSARTHI_SECURITY_ED25519_PRIVATE_KEY_HEX:${ED25519_PRIVATE_KEY_HEX}}
+    ed25519-key-version: ${ELECSARTHI_SECURITY_ED25519_KEY_VERSION:${ED25519_KEY_VERSION:1}}
+    voter-mobile-aes-key-hex: ${ELECSARTHI_SECURITY_VOTER_MOBILE_AES_KEY_HEX:${VOTER_MOBILE_AES_KEY_HEX}}
+    voter-mobile-key-version: ${ELECSARTHI_SECURITY_VOTER_MOBILE_KEY_VERSION:${VOTER_MOBILE_KEY_VERSION:1}}
 
 springdoc:
   api-docs:

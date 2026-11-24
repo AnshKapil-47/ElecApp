@@ -36,8 +36,8 @@ INSERT INTO app_user (username, full_name, password_hash, role) VALUES
 INSERT INTO customer_account (created_by_user_id, owning_agent_user_id, customer_name, contact_phone)
  VALUES (3, 3, 'Customer One', '+919800000001'), (4, 4, 'Customer Two', '+919800000002');
 INSERT INTO app_user (customer_account_id, created_by_user_id, username, full_name, role, status) VALUES
- (1, 3, 'ca1', 'C1 admin', 'CUSTOMER_ADMIN', 'PENDING'),
- (2, 4, 'ca2', 'C2 admin', 'CUSTOMER_ADMIN', 'PENDING');
+ (1, 3, 'ca1', 'C1 admin', 'CUSTOMER', 'PENDING'),
+ (2, 4, 'ca2', 'C2 admin', 'CUSTOMER', 'PENDING');
 INSERT INTO app_user (customer_account_id, created_by_user_id, username, full_name, password_hash, role) VALUES
  (1, 5, 'su11', 'Sub 1 of C1', 'x', 'SUBUSER'), (2, 6, 'su21', 'Sub 1 of C2', 'x', 'SUBUSER');
 -- ids: 1 owner, 2 subowner, 3 agentA, 4 agentB, 5 ca1, 6 ca2, 7 su11 (C1), 8 su21 (C2)
@@ -45,7 +45,9 @@ INSERT INTO app_user (customer_account_id, created_by_user_id, username, full_na
 SELECT pg_temp.reject($$UPDATE customer_account SET owning_agent_user_id = 2 WHERE id = 1$$,
   'owning agent must have role AGENT (Subowner given)');
 SELECT pg_temp.reject($$INSERT INTO app_user (customer_account_id, username, full_name, password_hash, role)
-  VALUES (1,'ca1b','second admin','x','CUSTOMER_ADMIN')$$, 'second primary login for one Customer');
+  VALUES (1,'ca1b','second admin','x','CUSTOMER')$$, 'second primary login for one Customer');
+SELECT pg_temp.reject($$INSERT INTO app_user (customer_account_id, username, full_name, password_hash, role)
+  VALUES (1,'legacy_ca','legacy admin','x','CUSTOMER_ADMIN')$$, 'reject non-canonical CUSTOMER_ADMIN role in app_user');
 SELECT pg_temp.reject($$INSERT INTO app_user (username, full_name, password_hash, role)
   VALUES ('lonely','x','x','SUBUSER')$$, 'Subuser without a Customer');
 SELECT pg_temp.reject($$INSERT INTO app_user (customer_account_id, username, full_name, password_hash, role)
@@ -168,14 +170,16 @@ SELECT pg_temp.accept($$INSERT INTO booth_assignment (customer_account_id, subus
 -- ---------- devices, leases, sync ----------
 INSERT INTO user_device (customer_account_id, user_id, user_role, installation_id, public_key, platform, status, activated_at)
  VALUES (1, 7, 'SUBUSER',        'inst-su11', 'pk', 'ANDROID', 'ACTIVE', now()),
-        (1, 5, 'CUSTOMER_ADMIN', 'inst-ca1',  'pk', 'ANDROID', 'ACTIVE', now()),
+        (1, 5, 'CUSTOMER',       'inst-ca1',  'pk', 'ANDROID', 'ACTIVE', now()),
         (2, 8, 'SUBUSER',        'inst-su21', 'pk', 'ANDROID', 'ACTIVE', now());
 SELECT pg_temp.accept($$INSERT INTO user_device (customer_account_id, user_id, user_role, installation_id, public_key, platform, status, activated_at)
   VALUES (NULL, 3, 'AGENT', 'inst-agentA', 'pk', 'ANDROID', 'ACTIVE', now())$$, 'Agent registers his phone (Agents use the app)');
 SELECT pg_temp.reject($$INSERT INTO user_device (customer_account_id, user_id, user_role, installation_id, platform)
   VALUES (NULL, 1, 'OWNER', 'inst-owner', 'ANDROID')$$, 'Owner registers a phone (Owner uses the web only)');
 SELECT pg_temp.reject($$INSERT INTO user_device (customer_account_id, user_id, user_role, installation_id, platform)
-  VALUES (1, 7, 'CUSTOMER_ADMIN', 'inst-fake', 'ANDROID')$$, 'Subuser''s device row claiming the CUSTOMER_ADMIN role');
+  VALUES (1, 7, 'CUSTOMER', 'inst-fake', 'ANDROID')$$, 'Subuser''s device row claiming the CUSTOMER role');
+SELECT pg_temp.reject($$INSERT INTO user_device (customer_account_id, user_id, user_role, installation_id, platform)
+  VALUES (1, 5, 'CUSTOMER_ADMIN', 'inst-legacy-dev', 'ANDROID')$$, 'reject non-canonical CUSTOMER_ADMIN role in user_device');
 SELECT pg_temp.reject($$INSERT INTO user_device (customer_account_id, user_id, user_role, installation_id, platform)
   VALUES (NULL, 7, 'SUBUSER', 'inst-noten', 'ANDROID')$$, 'Subuser device without its Customer');
 SELECT pg_temp.reject($$INSERT INTO user_device (customer_account_id, user_id, user_role, installation_id, public_key, platform, status)
@@ -231,8 +235,11 @@ SELECT pg_temp.reject($$INSERT INTO user_session (user_id, user_role, client_typ
 SELECT pg_temp.reject($$INSERT INTO user_session (user_id, user_role, client_type, absolute_expires_at, refresh_token_hash)
   VALUES (1, 'OWNER', 'WEB', now() + interval '12 hours', repeat('7',64))$$, 'refresh token on a WEB session');
 SELECT pg_temp.reject($$INSERT INTO user_session (user_id, user_role, device_id, client_type, absolute_expires_at)
-  SELECT 5, 'CUSTOMER_ADMIN', id, 'MOBILE', now() + interval '90 days' FROM user_device WHERE installation_id='inst-su11'$$,
+  SELECT 5, 'CUSTOMER', id, 'MOBILE', now() + interval '90 days' FROM user_device WHERE installation_id='inst-su11'$$,
   'session bound to another user''s device');
+SELECT pg_temp.reject($$INSERT INTO user_session (user_id, user_role, device_id, client_type, absolute_expires_at)
+  SELECT 5, 'CUSTOMER_ADMIN', id, 'MOBILE', now() + interval '90 days' FROM user_device WHERE installation_id='inst-ca1'$$,
+  'reject non-canonical CUSTOMER_ADMIN role in user_session');
 SELECT pg_temp.reject($$INSERT INTO user_session (user_id, user_role, client_type, absolute_expires_at, status)
   VALUES (1, 'OWNER', 'WEB', now(), 'TERMINATED')$$, 'terminated session without time and reason');
 

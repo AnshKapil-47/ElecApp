@@ -23,6 +23,11 @@ RUN ./mvnw clean package -DskipTests -B
 FROM eclipse-temurin:25-jre-noble AS runner
 WORKDIR /app
 
+# Install curl for reliable health checking
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
 # Security: Create unprivileged application user
 RUN addgroup --system --gid 10001 elecsarthi && \
     adduser --system --uid 10001 --ingroup elecsarthi elecsarthi
@@ -39,6 +44,6 @@ ENV SPRING_PROFILES_ACTIVE=prod \
     JAVA_TOOL_OPTIONS="-XX:+UseG1GC -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom"
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD wget --quiet --tries=1 --spider http://localhost:8080/actuator/health || exit 1
+  CMD curl -f http://localhost:8080/actuator/health || exit 1
 
 ENTRYPOINT ["java", "-jar", "/app/elecAppBackend.jar"]

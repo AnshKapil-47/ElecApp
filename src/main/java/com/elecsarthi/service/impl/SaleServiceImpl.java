@@ -393,8 +393,12 @@ public class SaleServiceImpl implements SaleService {
         }
 
         Long datasetId = matchingDatasetIds.get(0);
-        return datasetRepository.findById(datasetId)
+        Dataset dataset = datasetRepository.findById(datasetId)
                 .orElseThrow(() -> new ResourceNotFoundException("Resolved dataset not found: " + datasetId));
+        if (dataset.getStatus() != DatasetStatus.IMPORTED) {
+            throw new ApiException(ErrorCode.AREA_UNAVAILABLE, "Dataset is not in IMPORTED state: " + dataset.getStatus(), HttpStatus.BAD_REQUEST);
+        }
+        return dataset;
     }
 
     private void checkAmbiguity(ElectionType electionType, Long datasetId, Map<String, Object> criteriaMap) {

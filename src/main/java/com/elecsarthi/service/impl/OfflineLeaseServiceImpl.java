@@ -20,6 +20,7 @@ import com.elecsarthi.repository.BoothAssignmentRepository;
 import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.repository.OfflineLeaseRepository;
 import com.elecsarthi.security.device.CryptoUtils;
+import com.elecsarthi.security.signing.OfflineLeaseSigner;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.OfflineLeaseService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,6 +45,7 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
     private final OfflineLeaseRepository offlineLeaseRepository;
     private final BoothAssignmentRepository boothAssignmentRepository;
     private final EntitlementRepository entitlementRepository;
+    private final OfflineLeaseSigner offlineLeaseSigner;
     private final AppProperties appProperties;
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
@@ -119,10 +121,8 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
 
         String payloadSha256 = CryptoUtils.sha256Hex(payloadJson);
 
-        // Ed25519 signature
-        byte[] privKey = HexFormat.of().parseHex(appProperties.getSecurity().getEd25519PrivateKeyHex());
-        byte[] sigBytes = CryptoUtils.signEd25519(payloadSha256.getBytes(StandardCharsets.UTF_8), privKey);
-        String serverSignature = Base64.getEncoder().encodeToString(sigBytes);
+        // Ed25519 signature via OfflineLeaseSigner
+        String serverSignature = offlineLeaseSigner.signLeasePayload(payloadSha256);
 
         OfflineLease lease = OfflineLease.builder()
                 .boothAssignmentId(assignment.getId())
@@ -130,7 +130,7 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
                 .deviceId(deviceId)
                 .leaseSeq(nextSeq)
                 .payloadSha256(payloadSha256)
-                .signingKeyVersion((short) appProperties.getSecurity().getEd25519KeyVersion())
+                .signingKeyVersion(offlineLeaseSigner.getActiveKeyVersion())
                 .issuedAt(now)
                 .expiresAt(expiresAt)
                 .build();

@@ -6,16 +6,28 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-elecsarthi_db}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ElecSarthiSecret2026!}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - es_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-elecsarthi_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - elecsarthi-net
+
+  migration:
+    image: flyway/flyway:11-alpine
+    container_name: elecsarthi-flyway
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./src/main/resources/db/migration:/flyway/sql:ro
+    command: -url=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-elecsarthi_db} -user=${POSTGRES_USER:-postgres} -password=${POSTGRES_PASSWORD} -connectRetries=10 migrate
     networks:
       - elecsarthi-net
 
@@ -28,15 +40,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migration:
+        condition: service_completed_successfully
     ports:
       - "${SERVER_PORT:-8080}:8080"
     environment:
       SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-elecsarthi_db}
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-ElecSarthiSecret2026!}
-      ELECSARTHI_JWT_SECRET: ${ELECSARTHI_JWT_SECRET:-9f82c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2}
-      ELECSARTHI_SECURITY_ACTIVATION_PEPPER: ${ELECSARTHI_SECURITY_ACTIVATION_PEPPER:-prod-activation-pepper-93821039821}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER:-elecsarthi_app}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      ELECSARTHI_JWT_SECRET: ${ELECSARTHI_JWT_SECRET:?ELECSARTHI_JWT_SECRET is required}
+      ELECSARTHI_SECURITY_ACTIVATION_PEPPER: ${ELECSARTHI_SECURITY_ACTIVATION_PEPPER:?ELECSARTHI_SECURITY_ACTIVATION_PEPPER is required}
+      ELECSARTHI_SECURITY_ED25519_PRIVATE_KEY_HEX: ${ELECSARTHI_SECURITY_ED25519_PRIVATE_KEY_HEX:?ELECSARTHI_SECURITY_ED25519_PRIVATE_KEY_HEX is required}
+      ELECSARTHI_SECURITY_ED25519_KEY_VERSION: ${ELECSARTHI_SECURITY_ED25519_KEY_VERSION:-1}
+      ELECSARTHI_SECURITY_VOTER_MOBILE_AES_KEY_HEX: ${ELECSARTHI_SECURITY_VOTER_MOBILE_AES_KEY_HEX:?ELECSARTHI_SECURITY_VOTER_MOBILE_AES_KEY_HEX is required}
+      ELECSARTHI_SECURITY_VOTER_MOBILE_KEY_VERSION: ${ELECSARTHI_SECURITY_VOTER_MOBILE_KEY_VERSION:-1}
+      MOBILE_NUMBERS_ENABLED: ${MOBILE_NUMBERS_ENABLED:-false}
     networks:
       - elecsarthi-net
 

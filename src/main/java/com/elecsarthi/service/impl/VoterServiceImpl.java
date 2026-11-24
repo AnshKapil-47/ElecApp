@@ -10,6 +10,7 @@ import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.*;
+import com.elecsarthi.security.authorization.VoterAccessAuthorizer;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.VoterService;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -40,6 +41,7 @@ public class VoterServiceImpl implements VoterService {
     private final ElectionTypeFieldRepository fieldRepository;
     private final BoothAssignmentRepository boothAssignmentRepository;
     private final VoterRepository voterRepository;
+    private final VoterAccessAuthorizer voterAccessAuthorizer;
     private final AppProperties appProperties;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -408,9 +410,7 @@ public class VoterServiceImpl implements VoterService {
     }
 
     private Entitlement validateAccessAndGetEntitlement(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId) {
-        if (callerRole == Role.OWNER || callerRole == Role.SUBOWNER || callerRole == Role.AGENT) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Administrative and Agent roles are not permitted to access voter data", HttpStatus.FORBIDDEN);
-        }
+        voterAccessAuthorizer.validateVoterAccessRole(callerRole);
 
         Entitlement ent = entitlementRepository.findById(entitlementId)
                 .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found: " + entitlementId));
@@ -465,9 +465,8 @@ public class VoterServiceImpl implements VoterService {
             return null;
         }
 
-        boolean canViewUnmasked = appProperties.isMobileNumbersEnabled() &&
-                callerRole == Role.CUSTOMER &&
-                entitlementMobileAccess;
+        boolean canViewUnmasked = voterAccessAuthorizer.isMobileUnmasked(
+                appProperties.isMobileNumbersEnabled(), callerRole, entitlementMobileAccess);
 
         try {
             byte[] key = HexFormat.of().parseHex(appProperties.getSecurity().getVoterMobileAesKeyHex());

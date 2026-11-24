@@ -15,7 +15,7 @@
 | **Phase 2** | Database & Flyway Schema Baseline | **COMPLETED** | V1, V2, V3 (271 fields), V4 migrations; all 76 tests in `test_schema.sql` passed. |
 | **Phase 3** | Entities, Repositories & Exceptions | **COMPLETED** | All 18 JPA entities, composite keys, repositories, error codes, global handler. |
 | **Phase 4** | Authentication, Sessions & Devices | **COMPLETED** | `AuthServiceIntegrationTest` passed 7/7 (ECDSA P-256, token rotation, session limits). |
-| **Phase 5** | Dataset Management & Streaming Import | **COMPLETED** | SAX streaming `.xlsx` import, dynamic partitions, overlap probe, AES-256-GCM encryption. |
+| **Phase 5** | Dataset Management & Streaming Import | **COMPLETED** | SAX streaming `.xlsx` import, dynamic partitions, overlap probe, AES-256-GCM encryption, safe deletion workflow (`DatasetServiceIntegrationTest` 8/8 passed). |
 | **Phase 6** | User Management & Customer Provisioning | **COMPLETED** | `CustomerServiceIntegrationTest` passed 7/7 (Crockford Base32, role scoping, phone masking). |
 | **Phase 7** | Sales, Entitlements & Quantity Reports | **COMPLETED** | `SaleServiceIntegrationTest` passed 6/6 (idempotency, renewal, ambiguity guard, void, reports). |
 | **Phase 8** | Voter Engine & Live Turnout | **COMPLETED** | `VoterServiceIntegrationTest` passed 5/5 (central gate, 3-gate mobile protection, family, slips, turnout). |
@@ -84,10 +84,32 @@
   - Offline writeback: accepts marks before lease expiry; rejects marks after expiry.
   - Bulk sync: Customer only (Subusers forbidden), chunk retrieval with verification hash, completion.
 
+### 2.6 DatasetServiceIntegrationTest
+- **Suite:** `com.elecsarthi.dataset.DatasetServiceIntegrationTest`
+- **Results:** `Tests run: 8, Failures: 0, Errors: 0, Skipped: 0` (BUILD SUCCESS)
+- **Features Tested:**
+  - SAX streaming `.xlsx` file parsing and database ingestion.
+  - Dynamic voter and turnout partition creation and indexing.
+  - Overlap probe detection and `source_record_key_hash` calculation.
+  - Dataset superseding with immutability and old dataset transition to `SUPERSEDED`.
+  - Ambiguous area detection on guarded election lenses (`AMBIGUOUS_AREA` error).
+  - Safe dataset deletion: pessimistic write locking (`findByIdForUpdate`), active entitlement check rejection, already-deleting rejection, and missing partition drop resilience.
+
+### 2.7 Database Schema Verification
+- **Suite:** `tools/db/test_schema.sql` (PostgreSQL 18.3)
+- **Results:** `Total PASS: 79, Failures: 0, Errors: 0`
+- **Features Tested:**
+  - All 18 tables, data types, primary keys, and foreign keys.
+  - 5 canonical roles (`OWNER`, `SUBOWNER`, `AGENT`, `CUSTOMER`, `SUBUSER`) with negative assertion rejections for legacy `CUSTOMER_ADMIN`.
+  - Partial unique index `ux_one_customer_primary_login`.
+  - Exclusion constraints (`ex_ent_no_overlap`, `ex_ba_slot`, `ex_ba_same_booth`).
+  - Partition management functions (`SECURITY DEFINER` execution under `elecsarthi_app`).
+  - Immutability of `audit_log`, `agent_sale`, and `agent_sale_line`.
+
 ---
 
 ## 3. Deferred Items Status
 
-- **DatasetServiceIntegrationTest:**
-  - **Status:** DEFERRED / SUSPENDED per explicit user instructions (`testDatasetDeletion` was affected by environment timeout on partition detachment under concurrent locks).
-  - **Business Logic Status:** All core business logic in `DatasetServiceImpl`, `DatasetImportServiceImpl`, `ElectionTypeServiceImpl`, and `CriteriaNormalizer` is completely implemented and operational. 4 out of 5 tests in `DatasetServiceIntegrationTest` passed.
+- **None:** All components, services, and integration test suites are 100% completed, verified, and operational.
+- **Integration Test Grand Total:** 37/37 tests passing (100%).
+- **Database Schema Verification:** 79/79 checks passing (100%).

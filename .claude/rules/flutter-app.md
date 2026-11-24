@@ -5,7 +5,7 @@ paths:
 
 # Flutter app rules (Agent, Customer primary login, Subuser)
 
-- **Users:** AGENT, CUSTOMER_ADMIN and SUBUSER. Owner and Subowner never log in to the app (web only). One app, with screens chosen by the role from the server session; never by a role stored on the phone.
+- **Users:** AGENT, CUSTOMER and SUBUSER. Owner and Subowner never log in to the app (web only). One app, with screens chosen by the role from the server session; never by a role stored on the phone.
 - **Every app user** (Agents included) registers one device key and is bound to it.
 - **Agent screens (no voter data at all):**
   - own Customers: create, view, contact phone;

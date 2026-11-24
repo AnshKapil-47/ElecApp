@@ -51,15 +51,64 @@ Configure the following environment variables for production deployments:
    CREATE EXTENSION IF NOT EXISTS btree_gist;
    CREATE EXTENSION IF NOT EXISTS citext;
    ```
-3. Flyway migrations (`src/main/resources/db/migration/`) will automatically execute on application startup:
+3. Flyway migrations (`src/main/resources/db/migration/`) executed by migration user/pipeline:
    - `V1__elecsarthi_schema.sql` (18 tables, triggers, partition functions)
-   - `V2__runtime_role.sql` (Runtime role permissions)
+   - `V2__runtime_role.sql` (Runtime role permissions for `elecsarthi_app`)
    - `V3__seed_election_type_field.sql` (271 official election field definitions)
    - `V4__canonical_customer_role.sql` (Canonical role alignment)
+   - `V5__remove_legacy_customer_admin_role.sql` (Removal of legacy CUSTOMER_ADMIN role; SECURITY DEFINER partition management)
 
 ---
 
-## 4. Docker Deployment
+## 4. Least-Privilege Database Runtime User
+
+In production, the backend container runs under the unprivileged PostgreSQL user `elecsarthi_app`, NOT `postgres` or a superuser:
+- `elecsarthi_app` has `SELECT`, `INSERT`, `UPDATE` grants on standard tables.
+- Append-only audit log: `SELECT` and `INSERT` only (triggers reject `UPDATE` and `DELETE`).
+- Immutable sales lines: `SELECT` and `INSERT` only (no `UPDATE`, no `DELETE`).
+- Dataset partition creation and detachment: Delegated via `SECURITY DEFINER` stored functions (`create_dataset_partitions`, `create_dataset_indexes`, `detach_and_drop_dataset_partitions`), allowing `elecsarthi_app` to safely manage partition lifecycles without requiring PostgreSQL table ownership or superuser rights.
+
+---
+
+## 5. TLS Configuration: Option A vs Option B
+
+### Option A: Embedded Server TLS
+To terminate TLS directly in Spring Boot:
+Set `server.ssl.enabled=true`, configure `server.ssl.key-store`, `server.ssl.key-store-password`, and `server.ssl.key-store-type=PKCS12`.
+
+### Option B: Reverse Proxy TLS Termination (Recommended for Production)
+In modern containerized deployments (AWS ALB, Cloudflare, Nginx, HAProxy), TLS is terminated at the edge/reverse proxy:
+1. The backend application runs with HTTP on port 8080 (`server.ssl.enabled=false`).
+2. Spring Boot enables native forwarded header processing:
+   ```yaml
+   server:
+     port: 8080
+     forward-headers-strategy: native
+   ```
+3. The reverse proxy terminates TLS and forwards the client scheme and IP:
+   ```nginx
+   server {
+       listen 443 ssl http2;
+       server_name api.elecsarthi.com;
+
+       ssl_certificate /etc/letsencrypt/live/api.elecsarthi.com/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/api.elecsarthi.com/privkey.pem;
+
+       location / {
+           proxy_pass http://127.0.0.1:8080;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           proxy_set_header X-Forwarded-Port $server_port;
+       }
+   }
+   ```
+4. Spring Boot automatically recognizes `https://` URLs for redirects, OpenAPI specs, and secure session cookies based on `X-Forwarded-Proto`.
+
+---
+
+## 6. Docker Deployment
 
 ### 4.1 Standalone Docker Run
 ```bash

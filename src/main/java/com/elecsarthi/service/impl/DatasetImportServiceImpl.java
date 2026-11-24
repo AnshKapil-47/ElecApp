@@ -178,11 +178,16 @@ public class DatasetImportServiceImpl implements DatasetImportService {
 
             // Handle superseding if applicable
             if (request.getSupersedesDatasetId() != null) {
-                datasetRepository.findById(request.getSupersedesDatasetId()).ifPresent(old -> {
-                    old.setStatus(DatasetStatus.SUPERSEDED);
-                    old.setSupersededAt(now);
-                    datasetRepository.save(old);
-                });
+                Dataset old = datasetRepository.findById(request.getSupersedesDatasetId())
+                        .orElseThrow(() -> new ApiException(ErrorCode.BAD_REQUEST,
+                                "Superseded dataset not found: " + request.getSupersedesDatasetId(), HttpStatus.BAD_REQUEST));
+                if (old.getStatus() != DatasetStatus.IMPORTED) {
+                    throw new ConflictException(ErrorCode.CONFLICT,
+                            "Cannot supersede dataset in status: " + old.getStatus());
+                }
+                old.setStatus(DatasetStatus.SUPERSEDED);
+                old.setSupersededAt(now);
+                datasetRepository.save(old);
             }
 
             // Update completed dataset

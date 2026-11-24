@@ -30,7 +30,7 @@ For the feature or diff you are given:
    - voter access for Owner, Subowner or Agent;
    - Subowner seeing sales;
    - Agents seeing datasets;
-   - mobile numbers outside the switch + CUSTOMER_ADMIN + `mobile_access` rule;
+   - mobile numbers outside the switch + CUSTOMER + `mobile_access` rule;
    - Subusers bulk-syncing;
    - more than 2 booths or more than 7 days;
    - MASTER data past `delete_after`;
