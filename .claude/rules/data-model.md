@@ -9,7 +9,7 @@ paths:
 
 # Data model rules (loaded when working on SQL, entities, repositories)
 
-- The schema is `src/main/resources/db/migration/V1__elecsarthi_schema.sql` + `V2__runtime_role.sql` + `V3__seed_election_type_field.sql`. The explanation is `docs/data-model/ElecSarthi_ER_Diagram.md`. 18 tables; adding a table needs a written reason tied to an approved business rule.
+- The schema is `src/main/resources/db/migration/V1__elecsarthi_schema.sql` through `V6__harden_security_definer_partition_functions.sql`. The explanation is `docs/data-model/ElecSarthi_ER_Diagram.md`. 18 tables; adding a table needs a written reason tied to an approved business rule.
 - **Never edit an applied migration.** Add `V<next>__short_description.sql`. One logical change per migration. Include the matching grants for `elecsarthi_app` in the same migration.
 - Conventions: `bigint GENERATED ALWAYS AS IDENTITY` ids (uuid for session, device, lease, sync), `timestamptz` everywhere, enums as `text` + `CHECK (… IN (…))`, validity windows end-exclusive `[valid_from, valid_until)`, `char(64)` lowercase hex for hashes, no `ON DELETE CASCADE`.
 - Keep the DB-enforced guarantees intact (all are covered by `tools/db/test_schema.sql`):

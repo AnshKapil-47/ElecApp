@@ -12,7 +12,7 @@
 |---|---|---|---|
 | **Phase 0** | Repository & Architecture Audit | **COMPLETED** | Verified frozen 18-table ERD; reconciled migration delta; audited all files. |
 | **Phase 1** | Maven & Java 25 Baseline | **COMPLETED** | Moved root to `com.elecsarthi`; configured Java 25 & Spring Boot 4.2.0. |
-| **Phase 2** | Database & Flyway Schema Baseline | **COMPLETED** | V1, V2, V3 (271 fields), V4 migrations; all 76 tests in `test_schema.sql` passed. |
+| **Phase 2** | Database & Flyway Schema Baseline | **COMPLETED** | V1–V6 migrations (`src/main/resources/db/migration/`); all 83 tests in `test_schema.sql` passed on PostgreSQL 18.3. |
 | **Phase 3** | Entities, Repositories & Exceptions | **COMPLETED** | All 18 JPA entities, composite keys, repositories, error codes, global handler. |
 | **Phase 4** | Authentication, Sessions & Devices | **COMPLETED** | `AuthServiceIntegrationTest` passed 7/7 (ECDSA P-256, token rotation, session limits). |
 | **Phase 5** | Dataset Management & Streaming Import | **COMPLETED** | SAX streaming `.xlsx` import, dynamic partitions, overlap probe, AES-256-GCM encryption, safe deletion workflow (`DatasetServiceIntegrationTest` 8/8 passed). |
@@ -97,13 +97,13 @@
 
 ### 2.7 Database Schema Verification
 - **Suite:** `tools/db/test_schema.sql` (PostgreSQL 18.3)
-- **Results:** `Total PASS: 79, Failures: 0, Errors: 0`
+- **Results:** `Total PASS: 83, Failures: 0, Errors: 0`
 - **Features Tested:**
   - All 18 tables, data types, primary keys, and foreign keys.
   - 5 canonical roles (`OWNER`, `SUBOWNER`, `AGENT`, `CUSTOMER`, `SUBUSER`) with negative assertion rejections for legacy `CUSTOMER_ADMIN`.
   - Partial unique index `ux_one_customer_primary_login`.
   - Exclusion constraints (`ex_ent_no_overlap`, `ex_ba_slot`, `ex_ba_same_booth`).
-  - Partition management functions (`SECURITY DEFINER` execution under `elecsarthi_app`).
+  - Partition management functions (`SECURITY DEFINER` execution under `elecsarthi_app` with search_path pinning and input validation).
   - Immutability of `audit_log`, `agent_sale`, and `agent_sale_line`.
 
 ---
@@ -112,4 +112,14 @@
 
 - **None:** All components, services, and integration test suites are 100% completed, verified, and operational.
 - **Integration Test Grand Total:** 37/37 tests passing (100%).
-- **Database Schema Verification:** 79/79 checks passing (100%).
+- **Database Schema Verification:** 83/83 checks passing (100%).
+
+---
+
+## 4. External Legal and Operational Release Dependencies
+
+Technical production readiness is achieved. Live commercial deployment with real citizen electoral rolls remains gated behind external legal authorization:
+- **Voter Mobile Numbers:** `MOBILE_NUMBERS_ENABLED=false` until formal legal clearance confirms lawful source and consent.
+- **Voter Photographs:** Serving is disabled pending regulatory confirmation.
+- **Customer Account Deletion & Right to be Forgotten:** Accounts are suspended; hard erasure policy pending DPDP review.
+- **Data-Principal Requests (DPDP):** Citizen access/rectification procedures to be operationalized via organization SOPs.

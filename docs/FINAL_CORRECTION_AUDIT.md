@@ -135,7 +135,7 @@ This document tracks all forensic findings, root causes, planned corrections, im
 - **Original Problem:** Documentation and ER diagrams still referenced `CUSTOMER_ADMIN` or needed updates reflecting V5 and the completed architecture.
 - **Root Cause:** Incremental evolution across phases left certain documentation files reflecting older snapshots.
 - **Planned Correction:** Synchronize all markdown documentation, ER diagrams, rules, and implementation status with the final verified architecture.
-- **Actual Implementation:** Synchronized `README.md`, `HELP.md`, `ElecSarthi_ER_Diagram.md`, `REPOSITORY_AUDIT.md`, and `IMPLEMENTATION_STATUS.md`. Removed all legacy `CUSTOMER_ADMIN` role references in favor of the canonical 5 roles (`OWNER`, `SUBOWNER`, `AGENT`, `CUSTOMER`, `SUBUSER`), updated Flyway migration references to V1–V5, and recorded complete test suite pass status (37/37 integration tests, 79/79 schema tests).
+- **Actual Implementation:** Synchronized `README.md`, `HELP.md`, `ElecSarthi_ER_Diagram.md`, `REPOSITORY_AUDIT.md`, and `IMPLEMENTATION_STATUS.md`. Removed all legacy `CUSTOMER_ADMIN` role references in favor of the canonical 5 roles (`OWNER`, `SUBOWNER`, `AGENT`, `CUSTOMER`, `SUBUSER`), established exact migration filenames on disk (`V1`–`V6`, including `V4__canonical_customer_role.sql` and `V6__harden_security_definer_partition_functions.sql`), corrected ERD technical guidance to Java 25 & Spring Boot 4.2.0 with centralized layered architecture, documented external legal and operational release dependencies, and recorded complete test suite pass status (37/37 integration tests, 83/83 schema tests).
 - **Test Evidence:** Documented and verified across all files; git diff clean and consistent.
 - **Final Status:** FIXED
 
@@ -143,7 +143,7 @@ This document tracks all forensic findings, root causes, planned corrections, im
 
 ## Finding 8: Complete Test Suite Verification
 - **Component / File:**
-  - `tools/db/test_schema.sql` (79 assertions)
+  - `tools/db/test_schema.sql` (83 assertions)
   - `DatasetServiceIntegrationTest` (8 tests)
   - `AuthServiceIntegrationTest` (7 tests)
   - `CustomerServiceIntegrationTest` (7 tests)
@@ -154,7 +154,7 @@ This document tracks all forensic findings, root causes, planned corrections, im
 - **Root Cause:** Deferral pending safe deletion and lock handling fix.
 - **Planned Correction:** Run schema test script and all 6 integration test suites sequentially. Verify zero failures, zero errors, zero skipped.
 - **Actual Implementation:** 
-  1. Ran schema test suite against disposable database: 79/79 passed (0 errors, 0 failures).
+  1. Ran schema test suite against disposable database: 83/83 passed (0 errors, 0 failures).
   2. Ran all 6 integration test suites sequentially against PostgreSQL 18:
      - `AuthServiceIntegrationTest`: 7/7 passed (0 failures, 0 errors, 0 skipped).
      - `CustomerServiceIntegrationTest`: 7/7 passed (0 failures, 0 errors, 0 skipped).
@@ -162,5 +162,16 @@ This document tracks all forensic findings, root causes, planned corrections, im
      - `VoterServiceIntegrationTest`: 5/5 passed (0 failures, 0 errors, 0 skipped).
      - `SubuserServiceIntegrationTest`: 4/4 passed (0 failures, 0 errors, 0 skipped).
      - `DatasetServiceIntegrationTest`: 8/8 passed (0 failures, 0 errors, 0 skipped).
-- **Test Evidence:** 37/37 Java integration tests passed + 79/79 database schema tests passed against PostgreSQL 18. All builds reported `BUILD SUCCESS`.
+- **Test Evidence:** 37/37 Java integration tests passed + 83/83 database schema tests passed against PostgreSQL 18. All builds reported `BUILD SUCCESS`.
+- **Final Status:** FIXED
+
+---
+
+## Finding 9: Hardening of SECURITY DEFINER Partition Management Functions
+- **Component / File:** `src/main/resources/db/migration/V6__harden_security_definer_partition_functions.sql`, `tools/db/test_schema.sql`
+- **Original Problem:** `create_dataset_partitions`, `create_dataset_indexes`, and `detach_and_drop_dataset_partitions` lacked search_path pinning, schema qualification, strict input validation, namespace verification on `pg_inherits`, and default `PUBLIC` execution privileges had not been revoked.
+- **Root Cause:** Default PostgreSQL function semantics grant execution to `PUBLIC` and resolve objects using the caller's active search_path.
+- **Planned Correction:** Implement forward migration `V6` with `SET search_path = pg_catalog, public`, schema qualifications (`public.voter`), strict validation (`p_dataset_id > 0`), safe `%I` dynamic formatting, `REVOKE ... FROM PUBLIC`, and explicit grants strictly to `elecsarthi_app`. Add regression tests in `test_schema.sql`.
+- **Actual Implementation:** Authored and applied `V6__harden_security_definer_partition_functions.sql`. Tested execution under `elecsarthi_app` and verified permission denial under unprivileged roles. Added 4 regression assertions to `tools/db/test_schema.sql`.
+- **Test Evidence:** 83/83 schema checks passed on fresh PostgreSQL 18 database. Verified rejection of negative IDs, zero IDs, and unattached partitions.
 - **Final Status:** FIXED

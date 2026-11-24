@@ -51,10 +51,11 @@ elecsarthi-claude-kit/
 │   ├── V1__elecsarthi_schema.sql                  ← schema (18 tables, exclusion constraints, partitions)
 │   ├── V2__runtime_role.sql                       ← least-privilege runtime DB role (elecsarthi_app)
 │   ├── V3__seed_election_type_field.sql           ← field configuration from the sheet (271 rows)
-│   ├── V4__add_missing_indexes_and_constraints.sql ← performance indexes & foreign key cascades
-│   └── V5__remove_legacy_customer_admin_role.sql  ← canonical 5-role enforcement & SECURITY DEFINER partition funcs
+│   ├── V4__canonical_customer_role.sql            ← align existing persisted role values to canonical role CUSTOMER
+│   ├── V5__remove_legacy_customer_admin_role.sql  ← canonical 5-role enforcement & SECURITY DEFINER partition funcs
+│   └── V6__harden_security_definer_partition_functions.sql ← hardened SECURITY DEFINER partition funcs
 └── tools/
-    ├── db/run_tests.sh, db/test_schema.sql            ← 76 schema checks (all pass on PostgreSQL 16.15)
+    ├── db/run_tests.sh, db/test_schema.sql            ← 83 schema checks (all pass on PostgreSQL 18.3)
     ├── seed/gen_seed.py, seed/csv_to_migration.py     ← Excel → CSV → migration
     └── erd/gen_erd.py, erd/verify_ends.py             ← diagram generator + line-end checker
 ```
@@ -147,4 +148,4 @@ Hooks and permission rules are enforced by Claude Code itself; `CLAUDE.md` and t
 - Make the GitHub repository private before real data, keys or production paths exist, and keep secrets in a secret manager.
 - Backend target is Spring Boot 4.2.0 on Java 25 LTS with PostgreSQL 18.3.
 - Canonical 5 roles strictly enforced: OWNER, SUBOWNER, AGENT, CUSTOMER, SUBUSER.
-- Complete test suite verified: 79/79 schema tests pass; 37/37 integration tests pass.
+- Complete test suite verified: 83/83 schema tests pass; 37/37 integration tests pass.

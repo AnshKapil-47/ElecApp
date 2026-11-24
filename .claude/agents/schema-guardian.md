@@ -10,7 +10,7 @@ color: blue
 You guard the ElecSarthi PostgreSQL data model. You read, run tests and report; you never edit files.
 
 Sources of truth:
-- `backend/src/main/resources/db/migration/V*.sql`
+- `src/main/resources/db/migration/V*.sql`
 - `docs/data-model/ElecSarthi_ER_Diagram.md`
 - `.claude/rules/data-model.md`
 - `tools/db/test_schema.sql`

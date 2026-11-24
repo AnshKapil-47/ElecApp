@@ -274,6 +274,16 @@ SELECT pg_temp.reject($$INSERT INTO election_type_field (election_type_id, sourc
 SELECT pg_temp.reject($$DROP TABLE voter_d1$$, 'runtime role drops voter data');
 RESET ROLE;
 
+-- ---------- partition management validation (SECURITY DEFINER) ----------
+SELECT pg_temp.reject($$SELECT create_dataset_partitions(-1)$$, 'negative dataset_id rejected');
+SELECT pg_temp.reject($$SELECT detach_and_drop_dataset_partitions(0)$$, 'zero dataset_id rejected');
+SELECT pg_temp.reject($$SELECT create_dataset_indexes(99999)$$, 'create_dataset_indexes on unattached partition rejected');
+
+SET ROLE elecsarthi_app;
+SELECT pg_temp.accept($$SELECT create_dataset_partitions(95); SELECT create_dataset_indexes(95); SELECT detach_and_drop_dataset_partitions(95);$$,
+  'runtime role executes partition management via SECURITY DEFINER');
+RESET ROLE;
+
 -- ---------- dataset deletion by partition ----------
 SELECT pg_temp.accept($$
   DELETE FROM offline_lease; DELETE FROM sync_session; DELETE FROM booth_assignment WHERE entitlement_id IN (SELECT id FROM entitlement WHERE dataset_id = 2);

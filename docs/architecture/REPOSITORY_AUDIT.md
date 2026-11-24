@@ -43,8 +43,9 @@ This repository audit was conducted prior to modifying application code. The aud
   - `V1__elecsarthi_schema.sql`: Full 18-table DDL, constraints, triggers, partition management functions (`create_dataset_partitions`, `create_dataset_indexes`), exclusion constraints (`ex_ent_no_overlap`, `ex_ba_slot`, `ex_ba_same_booth`), and 8 seeded election types.
   - `V2__runtime_role.sql`: Grants for application runtime role `elecsarthi_app`.
   - `V3__seed_election_type_field.sql`: Generated from `election_type_field_seed.csv` via `tools/seed/csv_to_migration.py` (271 rows).
-  - `V4__add_missing_indexes_and_constraints.sql`: Performance indexes, foreign key cascades, and unique constraints.
-  - `V5__remove_legacy_customer_admin_role.sql`: Enforces canonical 5 roles, drops legacy `CUSTOMER_ADMIN` check constraints and triggers, and provides `SECURITY DEFINER` partition lifecycle functions (`create_dataset_partitions`, `create_dataset_indexes`, `detach_and_drop_dataset_partitions`) for the unprivileged `elecsarthi_app` user.
+  - `V4__canonical_customer_role.sql`: Aligns existing persisted role values to canonical role `CUSTOMER`.
+  - `V5__remove_legacy_customer_admin_role.sql`: Enforces canonical 5 roles, drops legacy `CUSTOMER_ADMIN` check constraints and triggers, and provides `SECURITY DEFINER` partition lifecycle functions.
+  - `V6__harden_security_definer_partition_functions.sql`: Hardens SECURITY DEFINER partition management functions (fixed search_path, input validation, revoke from PUBLIC, grant to `elecsarthi_app`).
 
 ### Discrepancy 2: Package Structure and Base Package
 - **Observation:** Workspace contained starter package `com.example.demo`.

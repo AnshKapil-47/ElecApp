@@ -8,8 +8,8 @@ argument-hint: "[short description of the change]"
 
 Follow every step. Do not skip the tests or the docs update.
 
-1. **Understand the change.** Read `.claude/rules/data-model.md` and the affected tables in `backend/src/main/resources/db/migration/V1__elecsarthi_schema.sql`. State in one or two sentences which business rule needs this change (see `.claude/rules/business-rules.md`). If no rule needs it, stop and ask.
-2. **Pick the version.** List `backend/src/main/resources/db/migration/` and use the next number: `V<next>__<snake_case_description>.sql`. Never edit an existing `V*.sql` that may have been applied to a shared database.
+1. **Understand the change.** Read `.claude/rules/data-model.md` and the affected tables in `src/main/resources/db/migration/V1__elecsarthi_schema.sql`. State in one or two sentences which business rule needs this change (see `.claude/rules/business-rules.md`). If no rule needs it, stop and ask.
+2. **Pick the version.** List `src/main/resources/db/migration/` and use the next number: `V<next>__<snake_case_description>.sql`. Never edit an existing `V*.sql` that may have been applied to a shared database.
 3. **Write the SQL** following the conventions:
    - `timestamptz`, `text` + `CHECK (… IN (…))` for enums, `char(64)` for hashes, end-exclusive validity ranges, no `ON DELETE CASCADE`.
    - Preserve the tested guarantees (exclusion constraints, role-checked and tenant composite FKs, append-only `audit_log`, immutable `agent_sale_line`).

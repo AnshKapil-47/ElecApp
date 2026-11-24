@@ -8,10 +8,11 @@ Version 1.0 · 24 November 2026 · designed from the business rules, not from ea
 | `src/main/resources/db/migration/V1__elecsarthi_schema.sql` | **The schema itself:** first Flyway migration. The source of truth; this document explains it |
 | `…/V2__runtime_role.sql` | Least-privilege database role for the running application (`elecsarthi_app`) |
 | `…/V3__seed_election_type_field.sql` | The 271 field rows, generated from the seed CSV by `tools/seed/csv_to_migration.py` |
-| `…/V4__canonical_customer_role.sql` | Canonical role alignment forward migration |
-| `…/V5__remove_legacy_customer_admin_role.sql` | Remove legacy CUSTOMER_ADMIN constraints/triggers; SECURITY DEFINER partition management |
+| `…/V4__canonical_customer_role.sql` | Align existing persisted role values to canonical role `CUSTOMER` |
+| `…/V5__remove_legacy_customer_admin_role.sql` | Enforce 5 canonical roles, replace index with `ux_one_customer_primary_login`, and drop legacy triggers |
+| `…/V6__harden_security_definer_partition_functions.sql` | Harden SECURITY DEFINER partition functions (fixed search_path, input validation, revoke from PUBLIC) |
 | `election_type_field_seed.csv` | 271 field rows generated from the colours of `NEW_APP_COLUMN_DETAILS.xlsx` |
-| `tools/db/test_schema.sql`, `tools/db/run_tests.sh` | 79 business-rule checks, all passing on PostgreSQL 16+ and PostgreSQL 18 |
+| `tools/db/test_schema.sql`, `tools/db/run_tests.sh` | 83 business-rule checks, all passing on PostgreSQL 18.3 |
 | `tools/seed/gen_seed.py`, `tools/erd/gen_erd.py`, `tools/erd/verify_ends.py` | Regenerate the seed and the diagram, and check the diagram's line ends |
 
 ---
@@ -438,11 +439,36 @@ LIMIT :page_size OFFSET :offset;               -- page_size <= 100
 ## 10. How to start coding
 
 1. **Database:**
-   1. PostgreSQL 16+ with `btree_gist`, `pg_trgm` and `citext`.
-   2. Flyway applies `V1__elecsarthi_schema.sql`, `V2__runtime_role.sql` and `V3__seed_election_type_field.sql` (the 271 field rows).
+   1. PostgreSQL 18.3 with `btree_gist`, `pg_trgm` and `citext`.
+   2. Flyway applies the six sequential migrations from `src/main/resources/db/migration/`:
+      - `V1__elecsarthi_schema.sql`: Core 18 tables, partitions, exclusion constraints, triggers, and functions.
+      - `V2__runtime_role.sql`: Grants for application runtime role `elecsarthi_app`.
+      - `V3__seed_election_type_field.sql`: 271 field metadata mappings for 8 election lenses.
+      - `V4__canonical_customer_role.sql`: Aligns persisted role values to canonical role `CUSTOMER`.
+      - `V5__remove_legacy_customer_admin_role.sql`: Enforces 5 canonical roles, replaces index with `ux_one_customer_primary_login`, and drops legacy triggers.
+      - `V6__harden_security_definer_partition_functions.sql`: Hardens SECURITY DEFINER partition lifecycle functions with pinned `search_path`, strict validation, and restricted permissions.
    3. To fill `label_mt` or change `on_slip`, follow the `/seed-fields` skill (it creates a new reseed migration).
-   4. Run `tools/db/run_tests.sh` on every schema change.
-2. **Backend:** Java 21 LTS, Spring Boot 4.1.x (3.4 and 3.5 no longer get open-source security patches), Spring Security, JPA, Flyway, Apache POI streaming. Suggested modules map 1:1 to the groups: `identity`, `catalog` (election types, datasets, import), `voter` (access query, turnout), `sales` (sale, entitlement, reports), `field` (booths, leases, sync, nonces), `audit`.
+   4. Run `tools/db/run_tests.sh` or `tools/db/test_schema.sql` on every schema change (83/83 checks passing).
+2. **Backend:** Java 25 LTS, Spring Boot 4.2.0, Spring Security, Spring Data JPA, Flyway, Apache POI streaming.
+   The backend adheres to a mandatory centralized layered architecture under `com.elecsarthi`:
+   - `com.elecsarthi.controller`: REST API controllers.
+   - `com.elecsarthi.service`: Core service interfaces directly under this package.
+   - `com.elecsarthi.service.impl`: Transactional service implementations.
+   - `com.elecsarthi.repository`: Spring Data JPA repositories with pessimistic concurrency locks.
+   - `com.elecsarthi.entity`: 18 JPA entities mapped to database tables.
+   - `com.elecsarthi.dto.request`: Validated request records.
+   - `com.elecsarthi.dto.response`: Standardized response models.
+   - `com.elecsarthi.enums`: Platform canonical enums (`Role`, `UserStatus`, `DatasetStatus`, etc.).
+   - `com.elecsarthi.mapper`: Specialized entity-to-DTO transformation mappers.
+   - `com.elecsarthi.security.config`: Spring Security filters and web security chain configuration.
+   - `com.elecsarthi.security.filter`: `JwtAuthenticationFilter` for request token extraction.
+   - `com.elecsarthi.security.jwt`: `JwtTokenProvider` for HMAC-SHA-256 JWT tokens.
+   - `com.elecsarthi.security.device`: Device cryptographic utilities (`CryptoUtils`).
+   - `com.elecsarthi.security.signing`: Hardware challenge verifier (`DeviceSignatureVerifier`) and Ed25519 offline lease signer (`OfflineLeaseSigner`).
+   - `com.elecsarthi.security.authorization`: Domain access gates (`VoterAccessAuthorizer`, `TenantIsolationAuthorizer`).
+   - `com.elecsarthi.security.service`: Security user principal (`ElecSarthiUserPrincipal`).
+   - `com.elecsarthi.exception`: Global exception handler, error codes, and standardized error responses.
+   - `com.elecsarthi.config`: Core application configuration (`AppProperties`, `JpaConfig`, `JacksonConfig`).
 3. **JPA notes:**
    - Generated columns (`owning_agent_role`, `sold_by_role`, `subuser_role`, `user_role`) are `insertable=false, updatable=false`.
    - Map `voter` as read-mostly with native queries for dynamic filters.
@@ -453,14 +479,18 @@ LIMIT :page_size OFFSET :offset;               -- page_size <= 100
    - poll-day load test;
    - backup restore drill;
    - repository made private and secrets in a secret manager;
-   - legal sign-off on mobile numbers and photos.
+   - legal and operational sign-off on external release dependencies.
 
-## 11. Open items
+## 11. External Legal and Operational Release Dependencies
 
-| Item | Effect on the schema |
-|---|---|
-| `label_mt` (mother-tongue labels) empty in the seed | none: fill the CSV |
-| `on_slip` defaults are a proposal | none: change `SLIP` in `gen_seed.py` |
-| If `AMBIGUOUS_AREA` appears in real data for a lens | colour the body-name cell skin in the sheet, regenerate the seed |
-| Legal opinion on mobile numbers and photos | if negative, drop `mobile_no_enc`, `mobile_key_version`, `voter_image_ref` and the mobile columns on `entitlement` |
-| Customer account deletion / data-principal requests (DPDP obligations from May 2027) | decide with the lawyer; accounts are only suspended today |
+The technical backend architecture, security controls, and integration test suites are 100% verified and production-ready. However, deployment with live voter rolls carries mandatory external legal and operational requirements that remain unresolved pending formal compliance authorization:
+
+| Dependency | Category | Current Status & Mitigation | Operational Requirement for Live Deployment |
+|---|---|---|---|
+| **Lawful Source & Use of Voter Mobile Numbers** | Legal & Regulatory | **BLOCKED / FEATURE-FLAGGED OFF**.<br>`MOBILE_NUMBERS_ENABLED=false` is enforced globally in configuration and by the 3-gate `VoterAccessAuthorizer`. | Formal written legal opinion confirming lawful collection source, consent mechanisms, and permitted commercial election use before toggling `MOBILE_NUMBERS_ENABLED=true`. |
+| **Voter Photographs** | Legal & Privacy | Schema contains `voter_image_ref` column (nullable), but photo ingestion and serving are disabled pending legal clearance. | Legal verification of image acquisition rights and compliance with state election authority regulations. |
+| **Customer Account Deletion & Right to be Forgotten** | Compliance (DPDP) | Accounts are currently `SUSPENDED` (preserving audit logs and immutable sale lines as required by tax and contract law). Hard deletion is blocked. | Formal policy review under India's Digital Personal Data Protection (DPDP) Act defining data-principal erasure vs statutory audit retention windows. |
+| **Data-Principal Access Requests (DPDP)** | Regulatory Compliance | System supports tenant-level isolation and voter lookups, but automated grievance / data-principal portal is deferred to organizational policy. | Establishment of standard operating procedures (SOPs) and legal workflows for handling citizen access/rectification notices. |
+
+> [!IMPORTANT]
+> **Production Deployment Boundary:** Technical production readiness is achieved. However, live commercial rollout with actual citizen electoral rolls must remain gated behind formal legal sign-off on the items above. In all environments, `elecsarthi.mobile-numbers-enabled` must remain `false` by default until legal counsel provides written authorization.

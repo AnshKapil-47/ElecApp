@@ -20,7 +20,7 @@ The CSV is generated from it; a hook blocks hand edits.
    - Mother-tongue labels: fill the `label_mt` column via a mapping in `gen_seed.py`, not by editing the CSV.
 2. Show the diff of the CSV (`git diff --stat` and the changed rows) and summarise per election type: filters added or removed, display fields added or removed.
 3. Create the migration with the next version number:
-   `python3 tools/seed/csv_to_migration.py docs/data-model/election_type_field_seed.csv backend/src/main/resources/db/migration/V<next>__reseed_election_type_field.sql`
+   `python3 tools/seed/csv_to_migration.py docs/data-model/election_type_field_seed.csv src/main/resources/db/migration/V<next>__reseed_election_type_field.sql`
    - A filter change also needs `election_type.guard_column` or `booth_column` updates in the same migration, if affected.
 4. Update the expected counts in `tools/db/test_schema.sql` (the "V3 seeded" check), then run `/db-test`.
 5. Update the filter table in `docs/data-model/ElecSarthi_ER_Diagram.md` §4 and `.claude/rules/business-rules.md`.
