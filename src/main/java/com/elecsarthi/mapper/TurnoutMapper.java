@@ -15,7 +15,6 @@ public class TurnoutMapper {
     public TurnoutResponse toResponse(VoterTurnout t, boolean voted) {
         if (t == null) return null;
         return TurnoutResponse.builder()
-                .datasetId(t.getDatasetId())
                 .customerAccountId(t.getCustomerAccountId())
                 .voterRowId(t.getVoterRowId())
                 .voted(voted)

@@ -1,5 +1,6 @@
 package com.elecsarthi.service.impl;
 
+import java.time.Clock;
 import com.elecsarthi.dto.request.DirectEntitlementRequest;
 import com.elecsarthi.dto.response.EntitlementResponse;
 import com.elecsarthi.entity.*;
@@ -7,24 +8,22 @@ import com.elecsarthi.enums.*;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ForbiddenException;
-import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.*;
+import com.elecsarthi.repository.OfflineLeaseRepository;
+import com.elecsarthi.service.AreaResolver;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.CriteriaNormalizer;
+import com.elecsarthi.service.DatasetService;
 import com.elecsarthi.service.EntitlementService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -37,12 +36,12 @@ public class EntitlementServiceImpl implements EntitlementService {
     private final EntitlementRepository entitlementRepository;
     private final CustomerAccountRepository customerAccountRepository;
     private final ElectionTypeRepository electionTypeRepository;
-    private final DatasetRepository datasetRepository;
+    private final OfflineLeaseRepository offlineLeaseRepository;
+    private final AreaResolver areaResolver;
+    private final DatasetService datasetService;
+    private final Clock clock;
     private final CriteriaNormalizer criteriaNormalizer;
     private final AuditService auditService;
-    private final JdbcTemplate jdbcTemplate;
-
-    private static final ZoneId KOLKATA_ZONE = ZoneId.of("Asia/Kolkata");
 
     @Override
     @Transactional
@@ -69,31 +68,12 @@ public class EntitlementServiceImpl implements EntitlementService {
 
         CriteriaNormalizer.NormalizedCriteria normalized = criteriaNormalizer.normalize(electionType, request.getCriteria());
 
-        Dataset dataset = resolveDataset(request.getStorageTier(), normalized.getCriteriaMap());
-        checkAmbiguity(electionType, dataset.getId(), normalized.getCriteriaMap());
-
-        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-        List<Entitlement> existingEntitlements = entitlementRepository.findLatestActiveForArea(
-                customer.getId(),
-                electionType.getId(),
-                request.getStorageTier(),
-                normalized.getCriteriaHash());
-
-        Instant validFrom = now;
-        if (!existingEntitlements.isEmpty()) {
-            Entitlement latest = existingEntitlements.get(0);
-            if (latest.getValidUntil().isAfter(now)) {
-                validFrom = latest.getValidUntil();
-            }
-        }
-
-        Instant validUntil = calculateValidUntil(validFrom, request.getDurationValue(), request.getDurationUnit());
-
-        if (request.getStorageTier() == DatasetTier.MASTER) {
-            if (dataset.getDeleteAfter() != null && validUntil.isAfter(dataset.getDeleteAfter())) {
-                throw new BadRequestException("Validity until " + validUntil + " exceeds MASTER dataset expiration " + dataset.getDeleteAfter());
-            }
-        }
+        Dataset dataset = areaResolver.resolveDataset(request.getStorageTier(), electionType, normalized);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        AreaResolver.ValidityWindow window = areaResolver.validityWindow(customer.getId(), electionType,
+                request.getStorageTier(), normalized, dataset, request.getDurationValue(), request.getDurationUnit(), now);
+        Instant validFrom = window.validFrom();
+        Instant validUntil = window.validUntil();
 
         Entitlement entitlement = Entitlement.builder()
                 .customerAccountId(customer.getId())
@@ -119,7 +99,7 @@ public class EntitlementServiceImpl implements EntitlementService {
 
         // Update LONG_TERM dataset delete_after to max(validUntil) + 30 days
         if (request.getStorageTier() == DatasetTier.LONG_TERM) {
-            recomputeLongTermRetention(dataset.getId(), now);
+            datasetService.recomputeLongTermRetention(dataset.getId(), now);
         }
 
         auditService.log(callerUserId, customer.getId(), entitlement.getDatasetId(), null,
@@ -142,7 +122,7 @@ public class EntitlementServiceImpl implements EntitlementService {
 
         // Bump customer mobileAccessPolicyVersion
         customerAccountRepository.findById(entitlement.getCustomerAccountId()).ifPresent(ca -> {
-            ca.setMobileAccessPolicyVersion(ca.getMobileAccessPolicyVersion() + 1);
+            ca.bumpMobileAccessPolicyVersion();
             customerAccountRepository.save(ca);
         });
 
@@ -165,7 +145,7 @@ public class EntitlementServiceImpl implements EntitlementService {
         }
 
         if (callerRole == Role.AGENT) {
-            if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
+            if (!customer.isOwnedByAgent(callerUserId)) {
                 throw new ForbiddenException("You are not the owning agent for this customer");
             }
         }
@@ -200,7 +180,7 @@ public class EntitlementServiceImpl implements EntitlementService {
 
         if (callerRole == Role.AGENT) {
             CustomerAccount customer = customerAccountRepository.requireById(entitlement.getCustomerAccountId());
-            if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
+            if (!customer.isOwnedByAgent(callerUserId)) {
                 throw new ForbiddenException("Access denied");
             }
         }
@@ -222,7 +202,7 @@ public class EntitlementServiceImpl implements EntitlementService {
             throw new BadRequestException("Entitlement is already revoked");
         }
 
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         entitlement.setStatus(EntitlementStatus.REVOKED);
         entitlement.setRevokedAt(now);
         entitlement.setRevokeReason(reason != null && !reason.isBlank() ? reason : "Revoked by " + callerRole.name());
@@ -230,16 +210,14 @@ public class EntitlementServiceImpl implements EntitlementService {
         entitlement = entitlementRepository.saveAndFlush(entitlement);
 
         // Cascade-revoke offline leases for booth assignments under this entitlement
-        jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? " +
-                "WHERE booth_assignment_id IN (SELECT id FROM booth_assignment WHERE entitlement_id = ?) AND revoked_at IS NULL",
-                Timestamp.from(now), callerUserId, entitlementId);
+        offlineLeaseRepository.revokeActiveByEntitlementId(entitlementId, now, callerUserId);
 
         // Recompute delete_after for LONG_TERM dataset
-        recomputeLongTermRetention(entitlement.getDatasetId(), now);
+        datasetService.recomputeLongTermRetention(entitlement.getDatasetId(), now);
 
         // Increment customer's mobile access policy version
         customerAccountRepository.findById(entitlement.getCustomerAccountId()).ifPresent(ca -> {
-            ca.setMobileAccessPolicyVersion(ca.getMobileAccessPolicyVersion() + 1);
+            ca.bumpMobileAccessPolicyVersion();
             customerAccountRepository.save(ca);
         });
 
@@ -252,93 +230,8 @@ public class EntitlementServiceImpl implements EntitlementService {
         return mapToResponse(entitlement, electionType);
     }
 
-    public void recomputeLongTermRetention(Long datasetId, Instant now) {
-        datasetRepository.findById(datasetId).ifPresent(ds -> {
-            if (ds.getStorageTier() == DatasetTier.LONG_TERM) {
-                String maxSql = "SELECT MAX(valid_until) FROM entitlement WHERE dataset_id = ? AND status = 'ACTIVE'";
-                Timestamp maxTs = jdbcTemplate.queryForObject(maxSql, Timestamp.class, datasetId);
-                Instant recomputed = (maxTs != null)
-                        ? maxTs.toInstant().plus(30, ChronoUnit.DAYS)
-                        : now.plus(30, ChronoUnit.DAYS);
-                ds.setDeleteAfter(recomputed);
-                datasetRepository.save(ds);
-                log.info("Recomputed LONG_TERM dataset {} delete_after to {}", datasetId, recomputed);
-            }
-        });
-    }
-
-    private Dataset resolveDataset(DatasetTier tier, Map<String, Object> criteriaMap) {
-        StringBuilder sql = new StringBuilder("SELECT DISTINCT v.dataset_id FROM voter v " +
-                "JOIN dataset d ON d.id = v.dataset_id " +
-                "WHERE d.storage_tier = ? AND d.status = 'IMPORTED'");
-
-        List<Object> params = new ArrayList<>();
-        params.add(tier.name());
-
-        for (Map.Entry<String, Object> entry : criteriaMap.entrySet()) {
-            sql.append(" AND v.").append(entry.getKey()).append(" = ?");
-            params.add(entry.getValue());
-        }
-
-        List<Long> matchingDatasetIds = jdbcTemplate.query(sql.toString(), (rs, rowNum) -> rs.getLong(1), params.toArray());
-
-        if (matchingDatasetIds.isEmpty()) {
-            throw new ApiException(ErrorCode.AREA_UNAVAILABLE, "Area not available for storage tier " + tier, HttpStatus.BAD_REQUEST);
-        }
-
-        if (matchingDatasetIds.size() > 1) {
-            throw new ApiException(ErrorCode.AREA_MULTIPLE_DATASETS, "Multiple datasets found for this area in tier " + tier, HttpStatus.BAD_REQUEST);
-        }
-
-        Long datasetId = matchingDatasetIds.get(0);
-        Dataset dataset = datasetRepository.findByIdForUpdate(datasetId)
-                .orElseThrow(() -> new ResourceNotFoundException("Resolved dataset not found: " + datasetId));
-        if (dataset.getStatus() != DatasetStatus.IMPORTED) {
-            throw new ApiException(ErrorCode.AREA_UNAVAILABLE, "Dataset is not in IMPORTED state: " + dataset.getStatus(), HttpStatus.BAD_REQUEST);
-        }
-        return dataset;
-    }
-
-    private void checkAmbiguity(ElectionType electionType, Long datasetId, Map<String, Object> criteriaMap) {
-        if (electionType.getGuardColumn() == null || electionType.getGuardColumn().isBlank()) {
-            return;
-        }
-
-        String guardCol = electionType.getGuardColumn().trim().toLowerCase();
-        StringBuilder sql = new StringBuilder("SELECT COUNT(DISTINCT ")
-                .append(guardCol)
-                .append(") FROM voter WHERE dataset_id = ?");
-
-        List<Object> params = new ArrayList<>();
-        params.add(datasetId);
-
-        for (Map.Entry<String, Object> entry : criteriaMap.entrySet()) {
-            sql.append(" AND ").append(entry.getKey()).append(" = ?");
-            params.add(entry.getValue());
-        }
-
-        Integer count = jdbcTemplate.queryForObject(sql.toString(), Integer.class, params.toArray());
-        if (count != null && count > 1) {
-            throw new ApiException(ErrorCode.AMBIGUOUS_AREA,
-                    "Area contains multiple " + guardCol + " values; ambiguous area",
-                    HttpStatus.BAD_REQUEST);
-        }
-    }
-
-    private Instant calculateValidUntil(Instant validFrom, int durationValue, DurationUnit durationUnit) {
-        ZonedDateTime start = validFrom.atZone(KOLKATA_ZONE);
-        ZonedDateTime end;
-        switch (durationUnit) {
-            case DAY -> end = start.plusDays(durationValue);
-            case WEEK -> end = start.plusWeeks(durationValue);
-            case MONTH -> end = start.plusMonths(durationValue);
-            default -> throw new BadRequestException("Unsupported duration unit: " + durationUnit);
-        }
-        return end.toInstant();
-    }
-
     private EntitlementResponse mapToResponse(Entitlement e, ElectionType electionType) {
-        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         String remaining;
         if (e.getStatus() == EntitlementStatus.REVOKED) {
             remaining = "Revoked";

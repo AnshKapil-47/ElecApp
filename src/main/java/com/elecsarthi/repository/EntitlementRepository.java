@@ -9,6 +9,8 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -16,9 +18,13 @@ import java.util.Optional;
 public interface EntitlementRepository extends JpaRepository<Entitlement, Long> {
     Optional<Entitlement> findByIdAndCustomerAccountId(Long id, Long customerAccountId);
     Optional<Entitlement> findBySaleLineId(Long saleLineId);
+    List<Entitlement> findBySaleLineIdIn(Collection<Long> saleLineIds);
     List<Entitlement> findByCustomerAccountId(Long customerAccountId);
     List<Entitlement> findByCustomerAccountIdAndStatus(Long customerAccountId, EntitlementStatus status);
     List<Entitlement> findByDatasetId(Long datasetId);
+
+    @Query("SELECT MAX(e.validUntil) FROM Entitlement e WHERE e.datasetId = :datasetId AND e.status = 'ACTIVE'")
+    Optional<Instant> findLatestActiveValidUntil(@Param("datasetId") Long datasetId);
 
     @Query("SELECT e FROM Entitlement e WHERE e.customerAccountId = :customerAccountId " +
            "AND e.electionTypeId = :electionTypeId " +

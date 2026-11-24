@@ -91,4 +91,13 @@ public class CustomerAccount {
     @Column(name = "updated_at", nullable = false)
     @Builder.Default
     private Instant updatedAt = Instant.now();
+
+    public boolean isOwnedByAgent(Long agentUserId) {
+        return owningAgentUserId != null && owningAgentUserId.equals(agentUserId);
+    }
+
+    /** Tells the Customer's apps to re-check what they may show (for example mobile-number access). */
+    public void bumpMobileAccessPolicyVersion() {
+        this.mobileAccessPolicyVersion++;
+    }
 }

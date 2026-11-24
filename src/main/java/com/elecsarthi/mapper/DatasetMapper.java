@@ -32,6 +32,10 @@ public class DatasetMapper {
     }
 
     public DatasetDetailResponse toDetailResponse(Dataset d, List<ImportIssue> issues) {
+        return toDetailResponse(d, issues, null);
+    }
+
+    public DatasetDetailResponse toDetailResponse(Dataset d, List<ImportIssue> issues, String importedByUsername) {
         if (d == null) return null;
         List<ImportIssueResponse> issueResponses = (issues != null)
                 ? issues.stream().map(this::toIssueResponse).collect(Collectors.toList())
@@ -52,6 +56,7 @@ public class DatasetMapper {
                 .states(d.getStates())
                 .deleteAfter(d.getDeleteAfter())
                 .importedByUserId(d.getImportedByUserId())
+                .importedByUsername(importedByUsername)
                 .createdAt(d.getCreatedAt())
                 .completedAt(d.getCompletedAt())
                 .issues(issueResponses)

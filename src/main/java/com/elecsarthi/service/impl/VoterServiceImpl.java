@@ -2,24 +2,30 @@ package com.elecsarthi.service.impl;
 
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.VoterSearchRequest;
-import com.elecsarthi.dto.response.*;
-import com.elecsarthi.entity.*;
+import com.elecsarthi.dto.response.VoterDetailResponse;
+import com.elecsarthi.dto.response.VoterSlipFieldResponse;
+import com.elecsarthi.dto.response.VoterSlipResponse;
+import com.elecsarthi.dto.response.VoterSummaryResponse;
+import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.ElectionTypeField;
+import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.EntitlementStatus;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
-import com.elecsarthi.repository.*;
+import com.elecsarthi.mapper.VoterMapper;
+import com.elecsarthi.repository.ElectionTypeFieldRepository;
+import com.elecsarthi.repository.ElectionTypeRepository;
+import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.security.authorization.VoterAccessAuthorizer;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
-import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.VoterService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -29,46 +35,47 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
-import java.sql.Timestamp;
+import java.time.Clock;
 import java.time.Instant;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
+/**
+ * Every read of voter data goes through {@link #authorize}: the Customer's entitlement is checked against
+ * the database and {@link VoterScopeAuthorizer} supplies the SQL that restricts the query to the entitled area
+ * (and, for a Subuser, to the assigned booths). Client-sent ids are only lookup hints.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class VoterServiceImpl implements VoterService {
 
+    private static final String ACTION_GLOBAL_MOBILE_TOGGLE = "GLOBAL_MOBILE_TOGGLE";
+    private static final int MAX_PAGE_SIZE = 100;
+
+    private static final String VOTER_WITH_TURNOUT = "SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted "
+            + "FROM voter v "
+            + "LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id ";
+
     private final EntitlementRepository entitlementRepository;
     private final ElectionTypeRepository electionTypeRepository;
     private final ElectionTypeFieldRepository fieldRepository;
-    private final BoothAssignmentRepository boothAssignmentRepository;
-    private final VoterRepository voterRepository;
     private final VoterAccessAuthorizer voterAccessAuthorizer;
     private final VoterScopeAuthorizer voterScopeAuthorizer;
+    private final VoterMapper voterMapper;
     private final AuditService auditService;
     private final AppProperties appProperties;
     private final JdbcTemplate jdbcTemplate;
+    private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @PostConstruct
-    public void initGlobalSettings() {
-        try {
-            List<String> details = jdbcTemplate.query(
-                    "SELECT details FROM audit_log WHERE action_type = 'GLOBAL_MOBILE_TOGGLE' ORDER BY created_at DESC LIMIT 1",
-                    (rs, rowNum) -> rs.getString("details")
-            );
-            if (!details.isEmpty()) {
-                JsonNode node = objectMapper.readTree(details.get(0));
-                if (node.has("enabled")) {
-                    boolean enabled = node.get("enabled").asBoolean();
-                    appProperties.setMobileNumbersEnabled(enabled);
-                    log.info("Restored global mobileNumbersEnabled setting from audit_log: {}", enabled);
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Could not restore global mobile toggle from audit_log: {}", e.getMessage());
+    /** An authorized request: the entitlement, its election type and the SQL scope of what it may read. */
+    private record Access(Entitlement entitlement, ElectionType electionType, VoterScope scope, boolean mobileUnmasked) {
+        String boothColumn() {
+            return scope.boothColumn();
         }
     }
 
@@ -78,342 +85,172 @@ public class VoterServiceImpl implements VoterService {
         if (request.getEntitlementId() == null) {
             throw new BadRequestException("Entitlement ID is required");
         }
+        Access access = authorize(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
+        VoterScope scope = access.scope();
 
-        Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
-        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
-
-        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
-        String boothColumn = scope.boothColumn();
-
-        int limit = Math.min(Math.max(1, request.getLimit()), 100);
+        int limit = Math.min(Math.max(1, request.getLimit()), MAX_PAGE_SIZE);
         int page = Math.max(0, request.getPage());
-        int offset = page * limit;
+        PageRequest pageRequest = PageRequest.of(page, limit);
 
-        StringBuilder whereClause = new StringBuilder(" WHERE ").append(scope.whereClause());
+        if (request.getBooth() != null && scope.allowedBooths() != null && !scope.allowedBooths().contains(request.getBooth())) {
+            return new PageImpl<>(Collections.emptyList(), pageRequest, 0);
+        }
+
+        StringBuilder where = new StringBuilder(" WHERE ").append(scope.whereClause());
         List<Object> params = new ArrayList<>(scope.params());
+        appendSearchFilters(request, access.boothColumn(), customerAccountId, where, params);
 
-        // User request filters
-        if (request.getBooth() != null) {
-            if (scope.allowedBooths() != null && !scope.allowedBooths().contains(request.getBooth())) {
-                return new PageImpl<>(Collections.emptyList(), PageRequest.of(page, limit), 0);
-            }
-            whereClause.append(" AND v.").append(boothColumn).append(" = ? ");
-            params.add(request.getBooth());
+        Long total = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM voter v " + where, Long.class, params.toArray());
+        if (total == null || total == 0) {
+            return new PageImpl<>(Collections.emptyList(), pageRequest, 0);
         }
-
-        if (request.getEpic() != null && !request.getEpic().isBlank()) {
-            whereClause.append(" AND UPPER(v.voter_id) = UPPER(?) ");
-            params.add(request.getEpic().trim());
-        }
-
-        if (request.getName() != null && !request.getName().isBlank()) {
-            String nameTerm = "%" + request.getName().trim() + "%";
-            whereClause.append(" AND (v.v_fname_en ILIKE ? OR v.v_lname_en ILIKE ? OR (coalesce(v.v_fname_en,'') || ' ' || coalesce(v.v_lname_en,'')) ILIKE ? OR v.v_fname_mt ILIKE ? OR v.v_lname_mt ILIKE ?) ");
-            params.add(nameTerm);
-            params.add(nameTerm);
-            params.add(nameTerm);
-            params.add(nameTerm);
-            params.add(nameTerm);
-        }
-
-        if (request.getSectionNo() != null) {
-            whereClause.append(" AND v.section_no = ? ");
-            params.add(request.getSectionNo());
-        }
-
-        if (request.getGender() != null && !request.getGender().isBlank()) {
-            whereClause.append(" AND UPPER(v.sex) = UPPER(?) ");
-            params.add(request.getGender().trim());
-        }
-
-        if (request.getMinAge() != null) {
-            whereClause.append(" AND v.age >= ? ");
-            params.add(request.getMinAge());
-        }
-
-        if (request.getMaxAge() != null) {
-            whereClause.append(" AND v.age <= ? ");
-            params.add(request.getMaxAge());
-        }
-
-        if (request.getHouseNo() != null && !request.getHouseNo().isBlank()) {
-            whereClause.append(" AND v.house_no = ? ");
-            params.add(request.getHouseNo().trim());
-        }
-
-        if (request.getVoted() != null) {
-            if (request.getVoted()) {
-                whereClause.append(" AND EXISTS (SELECT 1 FROM voter_turnout vt WHERE vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id) ");
-            } else {
-                whereClause.append(" AND NOT EXISTS (SELECT 1 FROM voter_turnout vt WHERE vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id) ");
-            }
-            params.add(customerAccountId);
-        }
-
-        // Count query
-        String countSql = "SELECT COUNT(*) FROM voter v " + whereClause;
-        Long totalCount = jdbcTemplate.queryForObject(countSql, Long.class, params.toArray());
-        long total = (totalCount != null) ? totalCount : 0L;
-
-        if (total == 0) {
-            return new PageImpl<>(Collections.emptyList(), PageRequest.of(page, limit), 0);
-        }
-
-        // Data query with LEFT JOIN on turnout
-        StringBuilder selectSql = new StringBuilder("SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted " +
-                "FROM voter v " +
-                "LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id ");
 
         List<Object> selectParams = new ArrayList<>();
         selectParams.add(customerAccountId);
         selectParams.addAll(params);
-
-        selectSql.append(whereClause);
-        selectSql.append(" ORDER BY v.").append(boothColumn).append(" ASC, v.serial_no ASC LIMIT ? OFFSET ?");
         selectParams.add(limit);
-        selectParams.add(offset);
+        selectParams.add((long) page * limit);
+        String sql = VOTER_WITH_TURNOUT + where
+                + " ORDER BY v." + access.boothColumn() + " ASC, v.serial_no ASC LIMIT ? OFFSET ?";
+        List<VoterSummaryResponse> voters = jdbcTemplate.query(sql,
+                voterMapper.summaryRowMapper(access.boothColumn(), access.mobileUnmasked()), selectParams.toArray());
+        return new PageImpl<>(voters, pageRequest, total);
+    }
 
-        List<VoterSummaryResponse> voters = jdbcTemplate.query(selectSql.toString(), (rs, rowNum) -> {
-            byte[] encMobile = rs.getBytes("mobile_no_enc");
-            String mobileStr = processMobileNumber(encMobile, callerRole, ent.isMobileAccess());
-
-            Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
-            Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
-
-            Integer boothValue = rs.getObject(boothColumn, Integer.class);
-
-            return VoterSummaryResponse.builder()
-                    .id(rs.getLong("id"))
-                    .datasetId(rs.getLong("dataset_id"))
-                    .voterId(rs.getString("voter_id"))
-                    .serialNo(rs.getObject("serial_no", Integer.class))
-                    .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
-                    .firstNameEn(rs.getString("v_fname_en"))
-                    .lastNameEn(rs.getString("v_lname_en"))
-                    .firstNameMt(rs.getString("v_fname_mt"))
-                    .lastNameMt(rs.getString("v_lname_mt"))
-                    .relationFirstNameEn(rs.getString("vr_fname_en"))
-                    .relationLastNameEn(rs.getString("vr_lname_en"))
-                    .houseNo(rs.getString("house_no"))
-                    .age(rs.getObject("age", Integer.class))
-                    .gender(rs.getString("sex"))
-                    .sectionNameEn(rs.getString("section_name_en"))
-                    .mobileNumber(mobileStr)
-                    .voted(rs.getBoolean("is_voted"))
-                    .votedAt(votedAt)
-                    .build();
-        }, selectParams.toArray());
-
-        return new PageImpl<>(voters, PageRequest.of(page, limit), total);
+    /** Adds the user's optional filters; column names are fixed here or come from the scope, values are bind parameters. */
+    private static void appendSearchFilters(VoterSearchRequest request, String boothColumn, Long customerAccountId,
+                                            StringBuilder where, List<Object> params) {
+        if (request.getBooth() != null) {
+            where.append(" AND v.").append(boothColumn).append(" = ? ");
+            params.add(request.getBooth());
+        }
+        if (hasText(request.getEpic())) {
+            where.append(" AND UPPER(v.voter_id) = UPPER(?) ");
+            params.add(request.getEpic().trim());
+        }
+        if (hasText(request.getName())) {
+            where.append(" AND (v.v_fname_en ILIKE ? OR v.v_lname_en ILIKE ? "
+                    + "OR (coalesce(v.v_fname_en,'') || ' ' || coalesce(v.v_lname_en,'')) ILIKE ? "
+                    + "OR v.v_fname_mt ILIKE ? OR v.v_lname_mt ILIKE ?) ");
+            params.addAll(Collections.nCopies(5, "%" + request.getName().trim() + "%"));
+        }
+        if (request.getSectionNo() != null) {
+            where.append(" AND v.section_no = ? ");
+            params.add(request.getSectionNo());
+        }
+        if (hasText(request.getGender())) {
+            where.append(" AND UPPER(v.sex) = UPPER(?) ");
+            params.add(request.getGender().trim());
+        }
+        if (request.getMinAge() != null) {
+            where.append(" AND v.age >= ? ");
+            params.add(request.getMinAge());
+        }
+        if (request.getMaxAge() != null) {
+            where.append(" AND v.age <= ? ");
+            params.add(request.getMaxAge());
+        }
+        if (hasText(request.getHouseNo())) {
+            where.append(" AND v.house_no = ? ");
+            params.add(request.getHouseNo().trim());
+        }
+        if (request.getVoted() != null) {
+            where.append(request.getVoted() ? " AND EXISTS " : " AND NOT EXISTS ")
+                    .append("(SELECT 1 FROM voter_turnout vt WHERE vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id) ");
+            params.add(customerAccountId);
+        }
     }
 
     @Override
     @Transactional(readOnly = true)
     public VoterDetailResponse getVoterDetail(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId, Long voterId) {
-        Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, entitlementId);
-        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
+        Access access = authorize(callerUserId, callerRole, customerAccountId, entitlementId);
 
-        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
-        String boothColumn = scope.boothColumn();
-
-        String sql = "SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted " +
-                "FROM voter v " +
-                "LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id " +
-                "WHERE v.id = ? AND " + scope.whereClause();
-
-        List<Object> selectParams = new ArrayList<>();
-        selectParams.add(customerAccountId);
-        selectParams.add(voterId);
-        selectParams.addAll(scope.params());
-
-        List<VoterDetailResponse> results = jdbcTemplate.query(sql, (rs, rowNum) -> {
-            byte[] encMobile = rs.getBytes("mobile_no_enc");
-            String mobileStr = processMobileNumber(encMobile, callerRole, ent.isMobileAccess());
-
-            Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
-            Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
-
-            Integer boothValue = rs.getObject(boothColumn, Integer.class);
-
-            return VoterDetailResponse.builder()
-                    .id(rs.getLong("id"))
-                    .datasetId(rs.getLong("dataset_id"))
-                    .voterId(rs.getString("voter_id"))
-                    .serialNo(rs.getObject("serial_no", Integer.class))
-                    .state(rs.getString("state"))
-                    .district(rs.getString("district"))
-                    .pcNo(rs.getObject("pc_no", Integer.class))
-                    .pcNameEn(rs.getString("pc_name_en"))
-                    .acNo(rs.getObject("ac_no", Integer.class))
-                    .acNameEn(rs.getString("ac_name_en"))
-                    .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
-                    .boothNameEn(rs.getString("booth_name_en"))
-                    .boothAddressEn(rs.getString("booth_address_en"))
-                    .firstNameEn(rs.getString("v_fname_en"))
-                    .lastNameEn(rs.getString("v_lname_en"))
-                    .firstNameMt(rs.getString("v_fname_mt"))
-                    .lastNameMt(rs.getString("v_lname_mt"))
-                    .relationFirstNameEn(rs.getString("vr_fname_en"))
-                    .relationLastNameEn(rs.getString("vr_lname_en"))
-                    .houseNo(rs.getString("house_no"))
-                    .sectionNo(rs.getObject("section_no", Integer.class))
-                    .sectionNameEn(rs.getString("section_name_en"))
-                    .age(rs.getObject("age", Integer.class))
-                    .gender(rs.getString("sex"))
-                    .mobileNumber(mobileStr)
-                    .voted(rs.getBoolean("is_voted"))
-                    .votedAt(votedAt)
-                    .build();
-        }, selectParams.toArray());
-
-        if (results.isEmpty()) {
+        List<Object> params = new ArrayList<>();
+        params.add(customerAccountId);
+        params.add(voterId);
+        params.addAll(access.scope().params());
+        List<VoterDetailResponse> found = jdbcTemplate.query(
+                VOTER_WITH_TURNOUT + "WHERE v.id = ? AND " + access.scope().whereClause(),
+                voterMapper.detailRowMapper(access.boothColumn(), access.mobileUnmasked()), params.toArray());
+        if (found.isEmpty()) {
             throw new ResourceNotFoundException("Voter not found with ID: " + voterId);
         }
-
-        return results.get(0);
+        return found.get(0);
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<VoterSummaryResponse> getFamilyMembers(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId, Long voterId) {
-        Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, entitlementId);
-        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
+        Access access = authorize(callerUserId, callerRole, customerAccountId, entitlementId);
+        String boothColumn = access.boothColumn();
 
-        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
-        String boothColumn = scope.boothColumn();
-
-        // 1. Fetch target voter strictly within caller's geographical entitlement scope
-        String voterSql = "SELECT v." + boothColumn + " AS target_booth, v.house_no " +
-                "FROM voter v WHERE v.id = ? AND " + scope.whereClause();
-
+        // The target voter must itself lie inside the caller's scope; family is then matched on booth and house number.
         List<Object> targetParams = new ArrayList<>();
         targetParams.add(voterId);
-        targetParams.addAll(scope.params());
-
-        List<Map<String, Object>> targetRows = jdbcTemplate.queryForList(voterSql, targetParams.toArray());
+        targetParams.addAll(access.scope().params());
+        List<Map<String, Object>> targetRows = jdbcTemplate.queryForList(
+                "SELECT v." + boothColumn + " AS target_booth, v.house_no FROM voter v WHERE v.id = ? AND " + access.scope().whereClause(),
+                targetParams.toArray());
         if (targetRows.isEmpty()) {
             throw new ResourceNotFoundException("Target voter not found with ID: " + voterId);
         }
-
-        Map<String, Object> target = targetRows.get(0);
-        Integer boothVal = (Integer) target.get("target_booth");
-        String houseNo = (String) target.get("house_no");
-
-        if (houseNo == null || houseNo.trim().isBlank()) {
-            // Cannot match family without a house number; return empty list
+        String houseNo = (String) targetRows.get(0).get("house_no");
+        if (houseNo == null || houseNo.isBlank()) {
             return Collections.emptyList();
         }
-
-        // 2. Fetch family members matching booth, house_no, and entitlement scope
-        String familySql = "SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted " +
-                "FROM voter v " +
-                "LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id " +
-                "WHERE v.house_no = ? AND v." + boothColumn + " = ? AND " + scope.whereClause() +
-                " ORDER BY v.serial_no ASC";
 
         List<Object> familyParams = new ArrayList<>();
         familyParams.add(customerAccountId);
         familyParams.add(houseNo.trim());
-        familyParams.add(boothVal);
-        familyParams.addAll(scope.params());
-
-        return jdbcTemplate.query(familySql, (rs, rowNum) -> {
-            byte[] encMobile = rs.getBytes("mobile_no_enc");
-            String mobileStr = processMobileNumber(encMobile, callerRole, ent.isMobileAccess());
-
-            Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
-            Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
-
-            Integer boothValue = rs.getObject(boothColumn, Integer.class);
-
-            return VoterSummaryResponse.builder()
-                    .id(rs.getLong("id"))
-                    .datasetId(rs.getLong("dataset_id"))
-                    .voterId(rs.getString("voter_id"))
-                    .serialNo(rs.getObject("serial_no", Integer.class))
-                    .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
-                    .firstNameEn(rs.getString("v_fname_en"))
-                    .lastNameEn(rs.getString("v_lname_en"))
-                    .firstNameMt(rs.getString("v_fname_mt"))
-                    .lastNameMt(rs.getString("v_lname_mt"))
-                    .relationFirstNameEn(rs.getString("vr_fname_en"))
-                    .relationLastNameEn(rs.getString("vr_lname_en"))
-                    .houseNo(rs.getString("house_no"))
-                    .age(rs.getObject("age", Integer.class))
-                    .gender(rs.getString("sex"))
-                    .sectionNameEn(rs.getString("section_name_en"))
-                    .mobileNumber(mobileStr)
-                    .voted(rs.getBoolean("is_voted"))
-                    .votedAt(votedAt)
-                    .build();
-        }, familyParams.toArray());
+        familyParams.add(targetRows.get(0).get("target_booth"));
+        familyParams.addAll(access.scope().params());
+        return jdbcTemplate.query(
+                VOTER_WITH_TURNOUT + "WHERE v.house_no = ? AND v." + boothColumn + " = ? AND " + access.scope().whereClause()
+                        + " ORDER BY v.serial_no ASC",
+                voterMapper.summaryRowMapper(boothColumn, access.mobileUnmasked()), familyParams.toArray());
     }
 
     @Override
     @Transactional(readOnly = true)
     public VoterSlipResponse getVoterSlip(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId, Long voterId) {
-        Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, entitlementId);
-        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
+        Access access = authorize(callerUserId, callerRole, customerAccountId, entitlementId);
 
-        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
-        String boothColumn = scope.boothColumn();
-
-        String sql = "SELECT * FROM voter v WHERE v.id = ? AND " + scope.whereClause();
         List<Object> params = new ArrayList<>();
         params.add(voterId);
-        params.addAll(scope.params());
-
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, params.toArray());
+        params.addAll(access.scope().params());
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT * FROM voter v WHERE v.id = ? AND " + access.scope().whereClause(), params.toArray());
         if (rows.isEmpty()) {
             throw new ResourceNotFoundException("Voter not found with ID: " + voterId);
         }
+        Map<String, Object> voter = rows.get(0);
 
-        Map<String, Object> voterRow = rows.get(0);
-        Integer boothValue = (Integer) voterRow.get(boothColumn);
+        List<VoterSlipFieldResponse> slipFields = fieldRepository
+                .findByElectionTypeIdAndOnSlipTrueOrderByDisplayOrderAsc(access.electionType().getId()).stream()
+                .map((ElectionTypeField field) -> VoterSlipFieldResponse.builder()
+                        .sourceColumn(field.getSourceColumn())
+                        .labelEn(field.getLabelEn())
+                        .labelMt(field.getLabelMt())
+                        .value(voter.get(field.getSourceColumn()))
+                        .build())
+                .toList();
 
-        List<ElectionTypeField> onSlipFields = fieldRepository.findByElectionTypeIdAndOnSlipTrueOrderByDisplayOrderAsc(electionType.getId());
-
-        List<VoterSlipFieldResponse> slipFields = onSlipFields.stream()
-                .map(f -> {
-                    Object val = voterRow.get(f.getSourceColumn());
-                    return VoterSlipFieldResponse.builder()
-                            .sourceColumn(f.getSourceColumn())
-                            .labelEn(f.getLabelEn())
-                            .labelMt(f.getLabelMt())
-                            .value(val)
-                            .build();
-                })
-                .collect(Collectors.toList());
-
-        String fnameEn = (String) voterRow.get("v_fname_en");
-        String lnameEn = (String) voterRow.get("v_lname_en");
-        String fullNameEn = ((fnameEn != null ? fnameEn : "") + " " + (lnameEn != null ? lnameEn : "")).trim();
-
-        String fnameMt = (String) voterRow.get("v_fname_mt");
-        String lnameMt = (String) voterRow.get("v_lname_mt");
-        String fullNameMt = ((fnameMt != null ? fnameMt : "") + " " + (lnameMt != null ? lnameMt : "")).trim();
-
-        String rfnameEn = (String) voterRow.get("vr_fname_en");
-        String rlnameEn = (String) voterRow.get("vr_lname_en");
-        String relNameEn = ((rfnameEn != null ? rfnameEn : "") + " " + (rlnameEn != null ? rlnameEn : "")).trim();
-
+        Integer boothValue = (Integer) voter.get(access.boothColumn());
         return VoterSlipResponse.builder()
                 .voterRowId(voterId)
-                .voterId((String) voterRow.get("voter_id"))
-                .serialNo((Integer) voterRow.get("serial_no"))
-                .partNo((Integer) voterRow.get("part_no"))
-                .boothNo(boothValue != null ? boothValue : (Integer) voterRow.get("booth_no"))
-                .fullNameEn(fullNameEn)
-                .fullNameMt(fullNameMt)
-                .relationNameEn(relNameEn)
-                .houseNo((String) voterRow.get("house_no"))
-                .age((Integer) voterRow.get("age"))
-                .gender((String) voterRow.get("sex"))
-                .pollingStationEn((String) voterRow.get("booth_name_en"))
-                .pollingStationAddressEn((String) voterRow.get("booth_address_en"))
+                .voterId((String) voter.get("voter_id"))
+                .serialNo((Integer) voter.get("serial_no"))
+                .partNo((Integer) voter.get("part_no"))
+                .boothNo(boothValue != null ? boothValue : (Integer) voter.get("booth_no"))
+                .fullNameEn(fullName(voter.get("v_fname_en"), voter.get("v_lname_en")))
+                .fullNameMt(fullName(voter.get("v_fname_mt"), voter.get("v_lname_mt")))
+                .relationNameEn(fullName(voter.get("vr_fname_en"), voter.get("vr_lname_en")))
+                .houseNo((String) voter.get("house_no"))
+                .age((Integer) voter.get("age"))
+                .gender((String) voter.get("sex"))
+                .pollingStationEn((String) voter.get("booth_name_en"))
+                .pollingStationAddressEn((String) voter.get("booth_address_en"))
                 .slipFields(slipFields)
                 .build();
     }
@@ -424,89 +261,70 @@ public class VoterServiceImpl implements VoterService {
         if (callerRole != Role.OWNER) {
             throw new ForbiddenException("Only OWNER can toggle global mobile numbers setting");
         }
+        // The switch is the latest GLOBAL_MOBILE_TOGGLE audit row (see isGlobalMobileNumbersEnabled).
+        auditService.logDetails(ownerUserId, null, null, null, ACTION_GLOBAL_MOBILE_TOGGLE, AuditOutcome.SUCCESS,
+                "system_setting", "mobile_numbers_enabled", Map.of("enabled", enabled), null);
 
-        // 1. Update memory configuration
-        appProperties.setMobileNumbersEnabled(enabled);
-
-        // 2. Audit the toggle to audit_log (persistent, audited)
-        auditService.log(ownerUserId, null, null, null,
-                "GLOBAL_MOBILE_TOGGLE", AuditOutcome.SUCCESS,
-                "system_setting", "mobile_numbers_enabled",
-                "{\"enabled\":" + enabled + "}", null);
-
-        // 3. Increment mobile_access_policy_version on all active customer accounts so mobile clients re-evaluate policy
+        // Apps re-check their mobile-number access when the policy version changes.
         jdbcTemplate.update("UPDATE customer_account SET mobile_access_policy_version = mobile_access_policy_version + 1 WHERE status = 'ACTIVE'");
-
         log.info("Global mobileNumbersEnabled updated to {} by owner {}, policy version bumped", enabled, ownerUserId);
     }
 
+    /**
+     * Gate 1 of the mobile-number rule. The latest toggle in the audit log wins; before the first toggle the
+     * configured default applies. On any error the switch is treated as off, so numbers stay masked.
+     */
     @Override
     public boolean isGlobalMobileNumbersEnabled() {
         try {
-            List<String> details = jdbcTemplate.query(
-                    "SELECT details FROM audit_log WHERE action_type = 'GLOBAL_MOBILE_TOGGLE' ORDER BY created_at DESC LIMIT 1",
-                    (rs, rowNum) -> rs.getString("details")
-            );
-            if (!details.isEmpty()) {
-                JsonNode node = objectMapper.readTree(details.get(0));
-                if (node.has("enabled")) {
-                    return node.get("enabled").asBoolean();
+            Optional<String> latest = jdbcTemplate.query(
+                    "SELECT details FROM audit_log WHERE action_type = '" + ACTION_GLOBAL_MOBILE_TOGGLE + "' ORDER BY created_at DESC LIMIT 1",
+                    (rs, rowNum) -> rs.getString("details")).stream().findFirst();
+            if (latest.isPresent()) {
+                JsonNode toggle = objectMapper.readTree(latest.get());
+                if (toggle.has("enabled")) {
+                    return toggle.get("enabled").asBoolean();
                 }
             }
             return appProperties.isMobileNumbersEnabled();
         } catch (Exception e) {
-            log.warn("Database error querying global mobile toggle, failing closed (false): {}", e.getMessage());
-            return false; // Fail closed: unmasking disabled on error
+            log.warn("Could not read the global mobile toggle, failing closed (false): {}", e.getMessage());
+            return false;
         }
     }
 
-    private Entitlement validateAccessAndGetEntitlement(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId) {
+    /**
+     * The central voter access check: role, the Customer's own ACTIVE entitlement valid right now, the
+     * area/booth scope, and the mobile-number decision (all three gates) for this caller.
+     */
+    private Access authorize(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId) {
         voterAccessAuthorizer.validateVoterAccessRole(callerRole);
 
-        Entitlement ent = entitlementRepository.findById(entitlementId)
+        Entitlement entitlement = entitlementRepository.findById(entitlementId)
                 .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found: " + entitlementId));
-
-        if (!ent.getCustomerAccountId().equals(customerAccountId)) {
+        if (!entitlement.getCustomerAccountId().equals(customerAccountId)) {
             throw new ForbiddenException("Entitlement does not belong to your customer account");
         }
-
-        if (ent.getStatus() != EntitlementStatus.ACTIVE) {
+        if (entitlement.getStatus() != EntitlementStatus.ACTIVE) {
             throw new ForbiddenException("Entitlement is revoked or not active");
         }
-
-        Instant now = Instant.now();
-        if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
+        Instant now = clock.instant();
+        if (now.isBefore(entitlement.getValidFrom()) || !now.isBefore(entitlement.getValidUntil())) {
             throw new ForbiddenException("Entitlement has expired or is not yet active");
         }
 
-        return ent;
+        ElectionType electionType = electionTypeRepository.requireById(entitlement.getElectionTypeId());
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(entitlement, electionType, callerUserId, callerRole, "v");
+        boolean mobileUnmasked = voterAccessAuthorizer.isMobileUnmasked(
+                isGlobalMobileNumbersEnabled(), callerRole, entitlement.isMobileAccess());
+        return new Access(entitlement, electionType, scope, mobileUnmasked);
     }
 
-    private String processMobileNumber(byte[] mobileNoEnc, Role callerRole, boolean entitlementMobileAccess) {
-        if (mobileNoEnc == null || mobileNoEnc.length == 0) {
-            return null;
-        }
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
 
-        boolean canViewUnmasked = voterAccessAuthorizer.isMobileUnmasked(
-                isGlobalMobileNumbersEnabled(), callerRole, entitlementMobileAccess);
-
-        try {
-            byte[] key = HexFormat.of().parseHex(appProperties.getSecurity().getVoterMobileAesKeyHex());
-            byte[] decrypted = CryptoUtils.aesGcmDecrypt(mobileNoEnc, key);
-            String plain = new String(decrypted, StandardCharsets.UTF_8).trim();
-            if (canViewUnmasked) {
-                return plain;
-            } else {
-                if (plain.length() >= 4) {
-                    return "+91*****" + plain.substring(plain.length() - 4);
-                } else {
-                    return "+91**********";
-                }
-            }
-        } catch (Exception e) {
-            // Never serve raw bytes if decryption fails; log warning and return null
-            log.warn("Voter mobile number decryption failed: {}", e.getMessage());
-            return null;
-        }
+    private static String fullName(Object first, Object last) {
+        return ((first != null ? first : "") + " " + (last != null ? last : "")).trim();
     }
 }

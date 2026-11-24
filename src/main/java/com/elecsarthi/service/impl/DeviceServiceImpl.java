@@ -225,22 +225,30 @@ public class DeviceServiceImpl implements DeviceService {
         UserDevice device = deviceRepository.findById(deviceId)
                 .orElseThrow(() -> new ResourceNotFoundException("Device not found"));
 
-        // Role-based revocation authorization
-        if (callerRole == Role.OWNER || callerRole == Role.SUBOWNER) {
+        AppUser callerUser = userRepository.findById(callerUserId)
+                .orElseThrow(() -> new ResourceNotFoundException("Caller user not found"));
+        if (callerUser.getStatus() != com.elecsarthi.enums.UserStatus.ACTIVE) {
+            throw new ForbiddenException("Caller account is not active.");
+        }
+        Role effectiveRole = callerUser.getRole();
+        if (callerRole != null && callerRole != effectiveRole) {
+            throw new ForbiddenException("Caller role mismatch.");
+        }
+
+        // Role-based revocation authorization grounded in authenticated database user & role
+        if (effectiveRole == Role.OWNER || effectiveRole == Role.SUBOWNER) {
             // Owner and Subowner have authority to revoke any device
-        } else if (callerRole == Role.AGENT) {
+        } else if (effectiveRole == Role.AGENT) {
             // Agent can only revoke devices belonging to customers assigned to this agent (or their subusers)
             if (device.getCustomerAccountId() == null) {
                 throw new ForbiddenException("Agents can only revoke devices for their assigned customers.");
             }
             CustomerAccount customer = customerAccountRepository.requireById(device.getCustomerAccountId());
-            if (!callerUserId.equals(customer.getOwningAgentUserId())) {
+            if (!customer.isOwnedByAgent(callerUserId)) {
                 throw new ForbiddenException("Agents can only revoke devices for their assigned customers.");
             }
-        } else if (callerRole == Role.CUSTOMER) {
+        } else if (effectiveRole == Role.CUSTOMER) {
             // Customer can only revoke subordinate SUBUSER devices within their own customer account
-            AppUser callerUser = userRepository.findById(callerUserId)
-                    .orElseThrow(() -> new ResourceNotFoundException("User not found"));
             if (device.getCustomerAccountId() == null || !device.getCustomerAccountId().equals(callerUser.getCustomerAccountId())) {
                 throw new ForbiddenException("Customers can only revoke devices belonging to their own organization.");
             }
@@ -268,13 +276,15 @@ public class DeviceServiceImpl implements DeviceService {
 
         auditService.log(callerUserId, device.getCustomerAccountId(), null, device.getId(),
                 "DEVICE_REVOKE", AuditOutcome.SUCCESS, "user_device", device.getId().toString(),
-                "{\"revokedByRole\":\"" + callerRole.name() + "\"}", clientIp);
+                "{\"revokedByRole\":\"" + effectiveRole.name() + "\"}", clientIp);
     }
 
     @Override
     @Transactional
     public void revokeDevice(UUID deviceId, Long revokedByUserId, String clientIp) {
-        revokeDevice(deviceId, revokedByUserId, Role.OWNER, clientIp);
+        AppUser caller = userRepository.findById(revokedByUserId)
+                .orElseThrow(() -> new ResourceNotFoundException("Caller user not found"));
+        revokeDevice(deviceId, revokedByUserId, caller.getRole(), clientIp);
     }
 
     @Override

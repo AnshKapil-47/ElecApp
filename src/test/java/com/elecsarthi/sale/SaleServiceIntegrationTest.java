@@ -502,4 +502,147 @@ public class SaleServiceIntegrationTest {
         SalesReportResponse agent2Report = reportService.getSalesReport(agent2.getId(), agent2.getRole(), null, null, null);
         assertEquals(0, agent2Report.getTotalSales());
     }
+
+    @Autowired
+    private UserDeviceRepository deviceRepository;
+
+    @Autowired
+    private BoothAssignmentRepository boothAssignmentRepository;
+
+    @Autowired
+    private OfflineLeaseRepository offlineLeaseRepository;
+
+    private CreateSaleRequest saleRequest(String key, DatasetTier tier, int acNo, int days) {
+        return CreateSaleRequest.builder()
+                .customerAccountId(customer1.getId())
+                .electionTypeId(vidhanSabha.getId())
+                .storageTier(tier)
+                .idempotencyKey(key)
+                .lines(List.of(SaleLineRequest.builder()
+                        .criteria(new HashMap<>(Map.of("state", "RAJASTHAN", "ac_no", acNo)))
+                        .durationValue(days)
+                        .durationUnit(DurationUnit.DAY)
+                        .build()))
+                .build();
+    }
+
+    private OfflineLease issueLease(Long entitlementId) {
+        Instant now = Instant.now();
+        AppUser subuser = userRepository.save(AppUser.builder()
+                .username("sale_subuser")
+                .fullName("Sale Subuser")
+                .customerAccountId(customer1.getId())
+                .passwordHash(passwordEncoder.encode("Password123!"))
+                .role(Role.SUBUSER)
+                .status(UserStatus.ACTIVE)
+                .build());
+        AppUser customerUser = userRepository.save(AppUser.builder()
+                .username("sale_customer_user")
+                .fullName("Sale Customer")
+                .customerAccountId(customer1.getId())
+                .passwordHash(passwordEncoder.encode("Password123!"))
+                .role(Role.CUSTOMER)
+                .status(UserStatus.ACTIVE)
+                .build());
+        UserDevice device = deviceRepository.save(UserDevice.builder()
+                .userId(subuser.getId())
+                .customerAccountId(customer1.getId())
+                .userRole(Role.SUBUSER)
+                .platform(DevicePlatform.ANDROID)
+                .deviceName("Subuser Phone")
+                .installationId("inst-sale-sub")
+                .publicKey("pk-sale-sub")
+                .status(DeviceStatus.ACTIVE)
+                .activatedAt(now)
+                .lastUsedAt(now)
+                .lastRequestCounter(0L)
+                .createdAt(now)
+                .build());
+        BoothAssignment assignment = boothAssignmentRepository.save(BoothAssignment.builder()
+                .subuserId(subuser.getId())
+                .customerAccountId(customer1.getId())
+                .entitlementId(entitlementId)
+                .boothValue(20)
+                .slot((short) 1)
+                .validFrom(now.minus(1, ChronoUnit.DAYS))
+                .validUntil(now.plus(5, ChronoUnit.DAYS))
+                .status(BoothAssignmentStatus.ACTIVE)
+                .assignedByUserId(customerUser.getId())
+                .createdAt(now)
+                .build());
+        return offlineLeaseRepository.save(OfflineLease.builder()
+                .boothAssignmentId(assignment.getId())
+                .subuserId(subuser.getId())
+                .deviceId(device.getId())
+                .leaseSeq(1L)
+                .payloadSha256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .signingKeyVersion((short) 1)
+                .issuedAt(now)
+                .expiresAt(now.plus(1, ChronoUnit.DAYS))
+                .build());
+    }
+
+    @Test
+    @DisplayName("Void sale: revokes the entitlement's offline leases and recomputes LONG_TERM retention")
+    void testVoidSaleRevokesLeasesAndRecomputesRetention() {
+        SaleResponse sale = saleService.createSale(agent1.getId(), saleRequest("void-lt-key", DatasetTier.LONG_TERM, 15, 30));
+        Long entitlementId = sale.getLines().get(0).getEntitlementId();
+        Entitlement entitlement = entitlementRepository.findById(entitlementId).orElseThrow();
+
+        Instant keptUntilWhileActive = datasetRepository.findById(datasetLongTerm.getId()).orElseThrow().getDeleteAfter();
+        assertEquals(entitlement.getValidUntil().plus(30, ChronoUnit.DAYS), keptUntilWhileActive,
+                "LONG_TERM data is kept 30 days after its latest entitlement ends");
+
+        OfflineLease lease = issueLease(entitlementId);
+        saleService.voidSale(owner.getId(), sale.getId(), VoidSaleRequest.builder().voidReason("Mistaken sale").build());
+
+        OfflineLease revoked = offlineLeaseRepository.findById(lease.getId()).orElseThrow();
+        assertNotNull(revoked.getRevokedAt());
+        assertEquals(owner.getId(), revoked.getRevokedByUserId());
+        Instant keptUntilAfterVoid = datasetRepository.findById(datasetLongTerm.getId()).orElseThrow().getDeleteAfter();
+        assertTrue(keptUntilAfterVoid.isBefore(keptUntilWhileActive),
+                "With no ACTIVE entitlement left the dataset is kept only 30 days from the void");
+    }
+
+    @Test
+    @DisplayName("Sale listings: every sale carries its lines and entitlement ids; agents and subowners are scoped")
+    void testSaleListingsCarryLinesAndRespectScope() {
+        SaleResponse masterSale = saleService.createSale(agent1.getId(), saleRequest("list-key-1", DatasetTier.MASTER, 12, 5));
+        SaleResponse longTermSale = saleService.createSale(agent1.getId(), saleRequest("list-key-2", DatasetTier.LONG_TERM, 15, 7));
+
+        List<SaleResponse> byAgent = saleService.getSalesByAgent(agent1.getId());
+        assertEquals(2, byAgent.size());
+        for (SaleResponse sale : byAgent) {
+            assertEquals("VIDHAN_SABHA", sale.getElectionTypeCode());
+            assertEquals(1, sale.getLines().size());
+            assertNotNull(sale.getLines().get(0).getEntitlementId());
+        }
+        assertEquals(Set.of(masterSale.getId(), longTermSale.getId()),
+                Set.of(byAgent.get(0).getId(), byAgent.get(1).getId()));
+        assertTrue(saleService.getSalesByAgent(agent2.getId()).isEmpty());
+
+        assertEquals(2, saleService.getSalesByCustomer(agent1.getId(), Role.AGENT, customer1.getId()).size());
+        assertEquals(2, saleService.getSalesByCustomer(owner.getId(), Role.OWNER, customer1.getId()).size());
+        assertThrows(ApiException.class, () -> saleService.getSalesByCustomer(agent2.getId(), Role.AGENT, customer1.getId()));
+        assertThrows(ApiException.class, () -> saleService.getSalesByCustomer(subowner.getId(), Role.SUBOWNER, customer1.getId()));
+    }
+
+    @Test
+    @DisplayName("Sale: an area that no dataset of the tier contains is rejected as AREA_UNAVAILABLE")
+    void testUnavailableAreaRejected() {
+        ApiException ex = assertThrows(ApiException.class,
+                () -> saleService.createSale(agent1.getId(), saleRequest("missing-area", DatasetTier.MASTER, 99, 5)));
+        assertEquals(com.elecsarthi.exception.errorcode.ErrorCode.AREA_UNAVAILABLE, ex.getErrorCode());
+        assertEquals(0, agentSaleRepository.count());
+    }
+
+    @Test
+    @DisplayName("Sale: a MASTER entitlement may not run past the dataset's deletion date")
+    void testMasterSaleCannotOutliveDataset() {
+        ApiException ex = assertThrows(ApiException.class,
+                () -> saleService.createSale(agent1.getId(), saleRequest("too-long", DatasetTier.MASTER, 12, 90)));
+        assertEquals(400, ex.getStatus().value());
+        assertEquals(0, agentSaleRepository.count());
+        assertEquals(0, entitlementRepository.count());
+    }
 }

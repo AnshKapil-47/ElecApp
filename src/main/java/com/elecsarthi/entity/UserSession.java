@@ -98,4 +98,11 @@ public class UserSession implements org.springframework.data.domain.Persistable<
 
     @Column(name = "user_agent")
     private String userAgent;
+
+    public void terminate(Instant at, String reason, Long terminatedByUserId) {
+        this.status = SessionStatus.TERMINATED;
+        this.terminatedAt = at;
+        this.terminationReason = reason;
+        this.terminatedByUserId = terminatedByUserId;
+    }
 }

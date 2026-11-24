@@ -337,4 +337,98 @@ public class DatasetServiceIntegrationTest {
             return bos.toByteArray();
         }
     }
+
+    private DatasetUploadRequest masterRequest(String name, Long supersedes) {
+        return DatasetUploadRequest.builder()
+                .name(name)
+                .electionTypeCode(ElectionTypeCode.VIDHAN_SABHA)
+                .storageTier(DatasetTier.MASTER)
+                .supersedesDatasetId(supersedes)
+                .build();
+    }
+
+    private MockMultipartFile xlsx(String fileName, byte[] bytes) {
+        return new MockMultipartFile("file", fileName,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes);
+    }
+
+    private boolean partitionExists(Long datasetId) {
+        Boolean exists = jdbcTemplate.queryForObject(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'voter_d" + datasetId + "')",
+                Boolean.class);
+        return Boolean.TRUE.equals(exists);
+    }
+
+    @Test
+    @DisplayName("Dataset import: overlapping records in the same tier are rejected and the failed dataset is cleaned up")
+    void testOverlappingImportRejectedAndCleanedUp() throws IOException {
+        datasetImportService.importDataset(xlsx("first.xlsx", createSampleVoterXlsx(3)), masterRequest("First", null), owner.getId());
+
+        ConflictException ex = assertThrows(ConflictException.class, () ->
+                datasetImportService.importDataset(xlsx("second.xlsx", createSampleVoterXlsx(4)), masterRequest("Second", null), owner.getId()));
+        assertEquals(com.elecsarthi.exception.errorcode.ErrorCode.DATASET_OVERLAP, ex.getErrorCode());
+
+        Dataset failed = datasetRepository.findAll().stream()
+                .filter(d -> d.getStatus() == DatasetStatus.FAILED).findFirst().orElseThrow();
+        assertFalse(partitionExists(failed.getId()), "Partitions of a failed import must be dropped");
+    }
+
+    @Test
+    @DisplayName("Dataset import: a correction supersedes the old dataset even though their records overlap")
+    void testSupersedingImportMarksOldDatasetSuperseded() throws IOException {
+        DatasetDetailResponse old = datasetImportService.importDataset(
+                xlsx("old.xlsx", createSampleVoterXlsx(3)), masterRequest("Old", null), owner.getId());
+
+        DatasetDetailResponse corrected = datasetImportService.importDataset(
+                xlsx("corrected.xlsx", createSampleVoterXlsx(4)), masterRequest("Corrected", old.getId()), owner.getId());
+
+        assertEquals(DatasetStatus.IMPORTED, corrected.getStatus());
+        assertEquals(old.getId(), corrected.getSupersedesDatasetId());
+        Dataset reloaded = datasetRepository.findById(old.getId()).orElseThrow();
+        assertEquals(DatasetStatus.SUPERSEDED, reloaded.getStatus());
+        assertNotNull(reloaded.getSupersededAt());
+    }
+
+    @Test
+    @DisplayName("Dataset import: only .xlsx files are accepted and nothing is persisted otherwise")
+    void testNonXlsxRejected() {
+        MockMultipartFile csv = new MockMultipartFile("file", "voters.csv", "text/csv", "a,b".getBytes());
+
+        assertThrows(com.elecsarthi.exception.common.BadRequestException.class, () ->
+                datasetImportService.importDataset(csv, masterRequest("Csv", null), owner.getId()));
+        assertEquals(0, datasetRepository.count());
+    }
+
+    @Test
+    @DisplayName("Dataset import: rows without voter_id are counted as failed and recorded as issues")
+    void testRowMissingRequiredFieldRecordedAsIssue() throws IOException {
+        byte[] bytes;
+        try (XSSFWorkbook workbook = new XSSFWorkbook(); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+            XSSFSheet sheet = workbook.createSheet("Voters");
+            String[] header = {"state", "ac_no", "serial_no", "voter_id"};
+            XSSFRow headerRow = sheet.createRow(0);
+            for (int i = 0; i < header.length; i++) {
+                headerRow.createCell(i).setCellValue(header[i]);
+            }
+            XSSFRow valid = sheet.createRow(1);
+            valid.createCell(0).setCellValue("HARYANA");
+            valid.createCell(1).setCellValue(10);
+            valid.createCell(2).setCellValue(1);
+            valid.createCell(3).setCellValue("EPIC1");
+            XSSFRow missingVoterId = sheet.createRow(2);
+            missingVoterId.createCell(0).setCellValue("HARYANA");
+            missingVoterId.createCell(1).setCellValue(10);
+            missingVoterId.createCell(2).setCellValue(2);
+            workbook.write(bos);
+            bytes = bos.toByteArray();
+        }
+
+        DatasetDetailResponse resp = datasetImportService.importDataset(
+                xlsx("partial.xlsx", bytes), masterRequest("Partial", null), owner.getId());
+
+        assertEquals(1, resp.getImportedRows());
+        assertEquals(1, resp.getFailedRows());
+        assertEquals(1, resp.getIssues().size());
+        assertEquals("MISSING_REQUIRED_FIELD", resp.getIssues().get(0).getIssueCode());
+    }
 }

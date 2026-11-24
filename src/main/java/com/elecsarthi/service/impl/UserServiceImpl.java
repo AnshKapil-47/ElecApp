@@ -163,10 +163,7 @@ public class UserServiceImpl implements UserService {
         Instant now = clock.instant();
         List<UserSession> activeSessions = sessionRepository.findByUserIdAndStatus(id, SessionStatus.ACTIVE);
         for (UserSession s : activeSessions) {
-            s.setStatus(SessionStatus.TERMINATED);
-            s.setTerminatedAt(now);
-            s.setTerminationReason(reason != null ? reason : "ADMIN_TERMINATED");
-            s.setTerminatedByUserId(callerUserId);
+            s.terminate(now, reason != null ? reason : "ADMIN_TERMINATED", callerUserId);
             sessionRepository.save(s);
         }
 

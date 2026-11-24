@@ -222,8 +222,12 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
                 "ON CONFLICT (dataset_id, customer_account_id, voter_row_id) DO NOTHING";
 
         for (OfflineTurnoutMarkDto mark : request.getMarks()) {
-            if (mark.getOfflineMarkedAt().isAfter(lease.getExpiresAt())) {
-                log.warn("Offline turnout mark rejected: marked at {} is after lease expiration {}", mark.getOfflineMarkedAt(), lease.getExpiresAt());
+            Instant markedAt = mark.getOfflineMarkedAt();
+            if (markedAt == null
+                    || markedAt.isBefore(lease.getIssuedAt())
+                    || !markedAt.isBefore(lease.getExpiresAt())) {
+                log.warn("Offline turnout mark rejected: marked at {} is outside strict lease interval [{}, {})",
+                        markedAt, lease.getIssuedAt(), lease.getExpiresAt());
                 totalRejected++;
                 continue;
             }
