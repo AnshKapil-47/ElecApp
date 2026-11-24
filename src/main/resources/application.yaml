@@ -1,0 +1,49 @@
+spring:
+  application:
+    name: elecsarthi-backend
+  profiles:
+    active: dev
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          batch_size: 50
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: 8080
+  shutdown: graceful
+
+elecsarthi:
+  mobile-numbers-enabled: false
+  jwt:
+    issuer: elecsarthi-auth
+    secret: "404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970"
+    access-token-expiration-minutes: 15
+    refresh-token-expiration-days: 30
+    session-absolute-expiration-days: 90
+    web-idle-expiration-minutes: 30
+    web-absolute-expiration-hours: 12
+  security:
+    activation-pepper: "elecsarthi-activation-dev-pepper-2026"
+    activation-code-expiration-hours: 72
+    activation-max-attempts: 5
+    device-challenge-expiration-minutes: 2
+    device-signature-window-minutes: 5
+    ed25519-private-key-hex: "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60e0a5ced346296312484a3b7d13e71789c9e83ec54c9da459048a1cb364718428"
+    ed25519-key-version: 1
+    voter-mobile-aes-key-hex: "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4"
+    voter-mobile-key-version: 1
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method

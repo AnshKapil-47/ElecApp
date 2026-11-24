@@ -1,0 +1,43 @@
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER:elecsarthi_app}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+      pool-name: ElecSarthiProdHikariPool
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: false # In production, migrations run via migration pipeline
+
+server:
+  port: ${PORT:8080}
+  ssl:
+    enabled: ${SSL_ENABLED:true}
+
+elecsarthi:
+  mobile-numbers-enabled: ${MOBILE_NUMBERS_ENABLED:false}
+  jwt:
+    issuer: elecsarthi-auth
+    secret: ${JWT_SECRET}
+    access-token-expiration-minutes: 15
+    refresh-token-expiration-days: 30
+    session-absolute-expiration-days: 90
+    web-idle-expiration-minutes: 30
+    web-absolute-expiration-hours: 12
+  security:
+    activation-pepper: ${ACTIVATION_PEPPER}
+    ed25519-private-key-hex: ${ED25519_PRIVATE_KEY_HEX}
+    ed25519-key-version: ${ED25519_KEY_VERSION:1}
+    voter-mobile-aes-key-hex: ${VOTER_MOBILE_AES_KEY_HEX}
+    voter-mobile-key-version: ${VOTER_MOBILE_KEY_VERSION:1}
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

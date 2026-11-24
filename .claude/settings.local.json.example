@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(docker run *)",
+      "Bash(docker start es-pg)"
+    ]
+  },
+  "env": {
+    "PGHOST": "localhost",
+    "PGPORT": "5432",
+    "PGUSER": "postgres"
+  }
+}
