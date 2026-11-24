@@ -26,6 +26,8 @@ public class LoginResponse {
     private ClientType clientType;
     private String accessToken;
     private String refreshToken; // Present only for MOBILE clients
+    private String registrationToken; // Present when device registration is required
+    private boolean deviceRegistrationRequired;
     private Instant expiresAt;
     private boolean mustChangePassword;
 }

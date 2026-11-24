@@ -6,19 +6,12 @@ import com.elecsarthi.dto.request.OfflineWritebackRequest;
 import com.elecsarthi.dto.request.RequestOfflineLeaseRequest;
 import com.elecsarthi.dto.response.OfflineLeaseResponse;
 import com.elecsarthi.dto.response.OfflineWritebackResponse;
-import com.elecsarthi.entity.BoothAssignment;
-import com.elecsarthi.entity.Entitlement;
-import com.elecsarthi.entity.OfflineLease;
-import com.elecsarthi.enums.AuditOutcome;
-import com.elecsarthi.enums.BoothAssignmentStatus;
-import com.elecsarthi.enums.EntitlementStatus;
-import com.elecsarthi.enums.Role;
+import com.elecsarthi.entity.*;
+import com.elecsarthi.enums.*;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.repository.BoothAssignmentRepository;
-import com.elecsarthi.repository.EntitlementRepository;
-import com.elecsarthi.repository.OfflineLeaseRepository;
+import com.elecsarthi.repository.*;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.security.signing.OfflineLeaseSigner;
 import com.elecsarthi.service.AuditService;
@@ -45,6 +38,10 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
     private final OfflineLeaseRepository offlineLeaseRepository;
     private final BoothAssignmentRepository boothAssignmentRepository;
     private final EntitlementRepository entitlementRepository;
+    private final ElectionTypeRepository electionTypeRepository;
+    private final UserDeviceRepository deviceRepository;
+    private final CustomerAccountRepository customerAccountRepository;
+    private final AppUserRepository userRepository;
     private final OfflineLeaseSigner offlineLeaseSigner;
     private final AppProperties appProperties;
     private final AuditService auditService;
@@ -176,18 +173,55 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
             throw new ApiException(ErrorCode.FORBIDDEN, "Offline lease has been revoked", HttpStatus.FORBIDDEN);
         }
 
+        Instant now = Instant.now();
+
         BoothAssignment assignment = boothAssignmentRepository.findById(lease.getBoothAssignmentId())
                 .orElseThrow(() -> new ResourceNotFoundException("Booth assignment not found"));
 
+        if (assignment.getStatus() != BoothAssignmentStatus.ACTIVE || !now.isBefore(assignment.getValidUntil())) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Booth assignment is revoked or expired", HttpStatus.FORBIDDEN);
+        }
+
         Entitlement ent = entitlementRepository.findById(assignment.getEntitlementId())
                 .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+
+        if (ent.getStatus() != EntitlementStatus.ACTIVE || !now.isBefore(ent.getValidUntil())) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement is revoked or expired", HttpStatus.FORBIDDEN);
+        }
+
+        if (deviceId != null) {
+            UserDevice device = deviceRepository.findById(deviceId)
+                    .orElseThrow(() -> new ApiException(ErrorCode.FORBIDDEN, "Device not found", HttpStatus.FORBIDDEN));
+            if (device.getStatus() != DeviceStatus.ACTIVE) {
+                throw new ApiException(ErrorCode.DEVICE_REVOKED, "Device is revoked or inactive", HttpStatus.FORBIDDEN);
+            }
+        }
+
+        // Revalidate customer account status
+        CustomerAccount customer = customerAccountRepository.findById(assignment.getCustomerAccountId())
+                .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+        if (customer.getStatus() != UserStatus.ACTIVE) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Customer account is suspended or inactive", HttpStatus.FORBIDDEN);
+        }
+
+        // Revalidate subuser status
+        AppUser subuser = userRepository.findById(subuserId)
+                .orElseThrow(() -> new ResourceNotFoundException("Subuser not found"));
+        if (subuser.getStatus() != UserStatus.ACTIVE) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Subuser is suspended or inactive", HttpStatus.FORBIDDEN);
+        }
+
+        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
+                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        String boothColumn = electionType.getBoothColumn();
 
         int totalSubmitted = request.getMarks().size();
         int totalAccepted = 0;
         int totalRejected = 0;
 
         String insertSql = "INSERT INTO voter_turnout (dataset_id, customer_account_id, voter_row_id, marked_by_user_id, marked_at, source) " +
-                "VALUES (?, ?, ?, ?, ?, 'OFFLINE_LEASE') " +
+                "SELECT ?, ?, v.id, ?, ?, 'OFFLINE_LEASE' " +
+                "FROM voter v WHERE v.id = ? AND v.dataset_id = ? AND v." + boothColumn + " = ? " +
                 "ON CONFLICT (dataset_id, customer_account_id, voter_row_id) DO NOTHING";
 
         for (OfflineTurnoutMarkDto mark : request.getMarks()) {
@@ -197,13 +231,19 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
                 continue;
             }
 
-            jdbcTemplate.update(insertSql,
+            int rows = jdbcTemplate.update(insertSql,
                     ent.getDatasetId(),
                     assignment.getCustomerAccountId(),
-                    mark.getVoterRowId(),
                     subuserId,
-                    Timestamp.from(mark.getOfflineMarkedAt()));
-            totalAccepted++;
+                    Timestamp.from(mark.getOfflineMarkedAt()),
+                    mark.getVoterRowId(),
+                    ent.getDatasetId(),
+                    assignment.getBoothValue());
+            if (rows > 0) {
+                totalAccepted++;
+            } else {
+                totalRejected++;
+            }
         }
 
         auditService.log(subuserId, assignment.getCustomerAccountId(), ent.getDatasetId(), deviceId,

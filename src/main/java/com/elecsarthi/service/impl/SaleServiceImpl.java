@@ -23,9 +23,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -84,7 +86,12 @@ public class SaleServiceImpl implements SaleService {
             throw new ApiException(ErrorCode.BAD_REQUEST, "Election type is not active", HttpStatus.BAD_REQUEST);
         }
 
-        // Canonical string for idempotency check
+        // Canonical string for idempotency check (Finding 21: use normalized canonical JSON)
+        List<CriteriaNormalizer.NormalizedCriteria> normalizedLines = new ArrayList<>();
+        for (SaleLineRequest lineReq : request.getLines()) {
+            normalizedLines.add(criteriaNormalizer.normalize(electionType, lineReq.getCriteria()));
+        }
+
         StringBuilder canonicalPayload = new StringBuilder();
         canonicalPayload.append(customer.getId()).append(":")
                 .append(electionType.getId()).append(":")
@@ -92,10 +99,11 @@ public class SaleServiceImpl implements SaleService {
 
         for (int i = 0; i < request.getLines().size(); i++) {
             SaleLineRequest line = request.getLines().get(i);
+            CriteriaNormalizer.NormalizedCriteria norm = normalizedLines.get(i);
             if (i > 0) canonicalPayload.append(";");
             canonicalPayload.append(line.getDurationValue()).append(":")
                     .append(line.getDurationUnit().name()).append(":")
-                    .append(new TreeMap<>(line.getCriteria()));
+                    .append(norm.getCanonicalJson());
         }
         canonicalPayload.append("]");
         String requestSha256 = CryptoUtils.sha256Hex(canonicalPayload.toString());
@@ -237,10 +245,17 @@ public class SaleServiceImpl implements SaleService {
                     .build());
         }
 
-        auditService.log(agentUserId, customer.getId(), null, null,
+        // Finding 17: Update LONG_TERM dataset delete_after to max(validUntil) + 30 days
+        for (ProcessedLine pl : processedLines) {
+            if (pl.dataset.getStorageTier() == DatasetTier.LONG_TERM) {
+                recomputeLongTermRetention(pl.dataset.getId(), now);
+            }
+        }
+
+        auditService.logDetails(agentUserId, customer.getId(), null, null,
                 "AGENT_SALE_CREATED", AuditOutcome.SUCCESS,
                 "agent_sale", sale.getId().toString(),
-                "{\"lines\":" + lineResponses.size() + "}", null);
+                Map.of("lines", lineResponses.size()), null);
 
         return SaleResponse.builder()
                 .id(sale.getId())
@@ -282,14 +297,26 @@ public class SaleServiceImpl implements SaleService {
 
         // Revoke matching entitlements
         List<AgentSaleLine> lines = agentSaleLineRepository.findBySaleIdOrderByLineNoAsc(saleId);
+        Set<Long> affectedDatasetIds = new HashSet<>();
         for (AgentSaleLine line : lines) {
             entitlementRepository.findBySaleLineId(line.getId()).ifPresent(ent -> {
                 ent.setStatus(EntitlementStatus.REVOKED);
                 ent.setRevokedAt(now);
                 ent.setRevokeReason("Sale voided: " + request.getVoidReason());
                 ent.setRevokedByUserId(ownerUserId);
-                entitlementRepository.save(ent);
+                entitlementRepository.saveAndFlush(ent);
+                affectedDatasetIds.add(ent.getDatasetId());
+
+                // Cascade-revoke offline leases for booth assignments under this entitlement
+                jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? " +
+                        "WHERE booth_assignment_id IN (SELECT id FROM booth_assignment WHERE entitlement_id = ?) AND revoked_at IS NULL",
+                        java.sql.Timestamp.from(now), ownerUserId, ent.getId());
             });
+        }
+
+        // Finding 17: Recompute delete_after for affected LONG_TERM datasets
+        for (Long dsId : affectedDatasetIds) {
+            recomputeLongTermRetention(dsId, now);
         }
 
         // Increment customer's mobile access policy version
@@ -298,10 +325,11 @@ public class SaleServiceImpl implements SaleService {
             customerAccountRepository.save(ca);
         });
 
-        auditService.log(ownerUserId, sale.getCustomerAccountId(), null, null,
+        // Finding 12: Safe audit logging with Map
+        auditService.logDetails(ownerUserId, sale.getCustomerAccountId(), null, null,
                 "SALE_VOIDED", AuditOutcome.SUCCESS,
                 "agent_sale", sale.getId().toString(),
-                "{\"reason\":\"" + request.getVoidReason() + "\"}", null);
+                Map.of("reason", request.getVoidReason() != null ? request.getVoidReason() : ""), null);
 
         String code = electionTypeRepository.findById(sale.getElectionTypeId())
                 .map(et -> et.getCode().name())
@@ -369,6 +397,21 @@ public class SaleServiceImpl implements SaleService {
                 .collect(Collectors.toList());
     }
 
+    public void recomputeLongTermRetention(Long datasetId, Instant now) {
+        datasetRepository.findById(datasetId).ifPresent(ds -> {
+            if (ds.getStorageTier() == DatasetTier.LONG_TERM) {
+                String maxSql = "SELECT MAX(valid_until) FROM entitlement WHERE dataset_id = ? AND status = 'ACTIVE'";
+                Timestamp maxTs = jdbcTemplate.queryForObject(maxSql, Timestamp.class, datasetId);
+                Instant recomputed = (maxTs != null)
+                        ? maxTs.toInstant().plus(30, ChronoUnit.DAYS)
+                        : now.plus(30, ChronoUnit.DAYS);
+                ds.setDeleteAfter(recomputed);
+                datasetRepository.save(ds);
+                log.info("Recomputed LONG_TERM dataset {} delete_after to {}", datasetId, recomputed);
+            }
+        });
+    }
+
     private Dataset resolveDataset(DatasetTier tier, Map<String, Object> criteriaMap) {
         StringBuilder sql = new StringBuilder("SELECT DISTINCT v.dataset_id FROM voter v " +
                 "JOIN dataset d ON d.id = v.dataset_id " +
@@ -393,7 +436,7 @@ public class SaleServiceImpl implements SaleService {
         }
 
         Long datasetId = matchingDatasetIds.get(0);
-        Dataset dataset = datasetRepository.findById(datasetId)
+        Dataset dataset = datasetRepository.findByIdForUpdate(datasetId)
                 .orElseThrow(() -> new ResourceNotFoundException("Resolved dataset not found: " + datasetId));
         if (dataset.getStatus() != DatasetStatus.IMPORTED) {
             throw new ApiException(ErrorCode.AREA_UNAVAILABLE, "Dataset is not in IMPORTED state: " + dataset.getStatus(), HttpStatus.BAD_REQUEST);

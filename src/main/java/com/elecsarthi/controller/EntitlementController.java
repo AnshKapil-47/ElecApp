@@ -2,6 +2,7 @@ package com.elecsarthi.controller;
 
 import com.elecsarthi.dto.request.DirectEntitlementRequest;
 import com.elecsarthi.dto.request.MobileAccessRequest;
+import com.elecsarthi.dto.request.RevokeEntitlementRequest;
 import com.elecsarthi.dto.response.EntitlementResponse;
 import com.elecsarthi.security.service.ElecSarthiUserPrincipal;
 import com.elecsarthi.service.EntitlementService;
@@ -43,6 +44,21 @@ public class EntitlementController {
             @PathVariable("id") Long id,
             @RequestBody MobileAccessRequest request) {
         EntitlementResponse response = entitlementService.updateMobileAccess(principal.getUserId(), id, request.isEnabled());
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/{id}/revoke")
+    @PreAuthorize("hasAnyRole('OWNER', 'SUBOWNER')")
+    @Operation(summary = "Revoke entitlement", description = "Allows Owner or Subowner to revoke an active entitlement")
+    public ResponseEntity<EntitlementResponse> revokeEntitlement(
+            @AuthenticationPrincipal ElecSarthiUserPrincipal principal,
+            @PathVariable("id") Long id,
+            @RequestBody(required = false) RevokeEntitlementRequest request) {
+        String reason = (request != null && request.getReason() != null && !request.getReason().isBlank())
+                ? request.getReason()
+                : "Revoked by " + principal.getRole().name();
+        EntitlementResponse response = entitlementService.revokeEntitlement(
+                principal.getUserId(), principal.getRole(), id, reason);
         return ResponseEntity.ok(response);
     }
 

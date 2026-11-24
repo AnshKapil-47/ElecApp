@@ -215,6 +215,10 @@ public class SubuserServiceImpl implements SubuserService {
         assignment.setRevokedByUserId(callerUserId);
         assignment = boothAssignmentRepository.save(assignment);
 
+        // Cascade-revoke any active offline leases associated with this booth assignment
+        jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? WHERE booth_assignment_id = ? AND revoked_at IS NULL",
+                java.sql.Timestamp.from(now), callerUserId, assignment.getId());
+
         auditService.log(callerUserId, assignment.getCustomerAccountId(), null, null,
                 "BOOTH_ASSIGNMENT_REVOKED", AuditOutcome.SUCCESS, "booth_assignment", assignment.getId().toString(),
                 "{\"reason\":\"" + request.getRevokeReason() + "\"}", null);

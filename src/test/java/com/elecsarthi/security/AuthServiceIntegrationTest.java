@@ -28,8 +28,15 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.Signature;
+import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Base64;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -182,7 +189,7 @@ public class AuthServiceIntegrationTest {
 
     @Test
     @DisplayName("Mobile refresh token rotation and reuse detection terminates compromised session")
-    void testRefreshTokenRotationAndReuseDetection() {
+    void testRefreshTokenRotationAndReuseDetection() throws Exception {
         AppUser agent = AppUser.builder()
                 .username("test_agent_rot")
                 .fullName("Agent Smith")
@@ -192,14 +199,22 @@ public class AuthServiceIntegrationTest {
                 .build();
         agent = userRepository.save(agent);
 
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+        kpg.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair kp = kpg.generateKeyPair();
+        String base64Pk = Base64.getEncoder().encodeToString(kp.getPublic().getEncoded());
+
         UserDevice device = UserDevice.builder()
                 .userId(agent.getId())
                 .userRole(Role.AGENT)
                 .installationId("inst-agent-rot")
                 .platform(DevicePlatform.ANDROID)
+                .publicKey(base64Pk)
                 .status(DeviceStatus.ACTIVE)
+                .lastRequestCounter(0L)
+                .createdAt(Instant.now())
                 .build();
-        deviceRepository.save(device);
+        device = deviceRepository.save(device);
 
         LoginResponse loginResp = authService.login(LoginRequest.builder()
                 .identifier("test_agent_rot")
@@ -210,21 +225,52 @@ public class AuthServiceIntegrationTest {
 
         String originalRefreshToken = loginResp.getRefreshToken();
 
-        // 1. First valid refresh -> succeeds and rotates token
+        // 1. First valid refresh with full device proof -> succeeds and rotates token
+        long ts = Instant.now().toEpochMilli();
+        String nonce1 = UUID.randomUUID().toString();
+        long counter1 = 1L;
+        String bodySha256 = CryptoUtils.sha256Hex(originalRefreshToken.getBytes(StandardCharsets.UTF_8));
+        String payload1 = String.join("\n", "POST", "/api/v1/auth/refresh", bodySha256, String.valueOf(ts), nonce1, String.valueOf(counter1), "");
+        Signature sig1 = Signature.getInstance("SHA256withECDSA");
+        sig1.initSign(kp.getPrivate());
+        sig1.update(payload1.getBytes(StandardCharsets.UTF_8));
+        String sigStr1 = Base64.getEncoder().encodeToString(sig1.sign());
+
         TokenRefreshResponse refresh1 = authService.refreshToken(
-                new RefreshTokenRequest(originalRefreshToken), "127.0.0.1");
+                new RefreshTokenRequest(originalRefreshToken), "127.0.0.1",
+                device.getId().toString(), sigStr1, String.valueOf(ts), nonce1, String.valueOf(counter1), null);
         assertNotNull(refresh1.getAccessToken());
         assertNotNull(refresh1.getRefreshToken());
         assertNotEquals(originalRefreshToken, refresh1.getRefreshToken());
 
-        // 2. Attacker attempts to reuse originalRefreshToken (lower generation)
+        // 2. Attacker attempts to reuse originalRefreshToken (lower generation) with device proof
+        long counter2 = 2L;
+        String nonce2 = UUID.randomUUID().toString();
+        String payload2 = String.join("\n", "POST", "/api/v1/auth/refresh", bodySha256, String.valueOf(ts), nonce2, String.valueOf(counter2), "");
+        Signature sig2 = Signature.getInstance("SHA256withECDSA");
+        sig2.initSign(kp.getPrivate());
+        sig2.update(payload2.getBytes(StandardCharsets.UTF_8));
+        String sigStr2 = Base64.getEncoder().encodeToString(sig2.sign());
+
+        final UserDevice dev = device;
         ApiException reuseEx = assertThrows(ApiException.class, () ->
-                authService.refreshToken(new RefreshTokenRequest(originalRefreshToken), "127.0.0.1"));
+                authService.refreshToken(new RefreshTokenRequest(originalRefreshToken), "127.0.0.1",
+                        dev.getId().toString(), sigStr2, String.valueOf(ts), nonce2, String.valueOf(counter2), null));
         assertEquals(401, reuseEx.getStatus().value());
 
         // 3. Compromised session is now TERMINATED, so even the new refresh token is revoked
+        long counter3 = 3L;
+        String nonce3 = UUID.randomUUID().toString();
+        String bodySha256_3 = CryptoUtils.sha256Hex(refresh1.getRefreshToken().getBytes(StandardCharsets.UTF_8));
+        String payload3 = String.join("\n", "POST", "/api/v1/auth/refresh", bodySha256_3, String.valueOf(ts), nonce3, String.valueOf(counter3), "");
+        Signature sig3 = Signature.getInstance("SHA256withECDSA");
+        sig3.initSign(kp.getPrivate());
+        sig3.update(payload3.getBytes(StandardCharsets.UTF_8));
+        String sigStr3 = Base64.getEncoder().encodeToString(sig3.sign());
+
         ApiException terminatedEx = assertThrows(ApiException.class, () ->
-                authService.refreshToken(new RefreshTokenRequest(refresh1.getRefreshToken()), "127.0.0.1"));
+                authService.refreshToken(new RefreshTokenRequest(refresh1.getRefreshToken()), "127.0.0.1",
+                        dev.getId().toString(), sigStr3, String.valueOf(ts), nonce3, String.valueOf(counter3), null));
         assertEquals(401, terminatedEx.getStatus().value());
     }
 

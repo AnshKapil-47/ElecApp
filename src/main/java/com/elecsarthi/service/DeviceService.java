@@ -10,6 +10,7 @@ import java.util.UUID;
 public interface DeviceService {
     DeviceRegisterResponse registerDevice(Long userId, DeviceRegisterRequest request, String clientIp);
     void verifyDevice(Long userId, DeviceVerifyRequest request, String clientIp);
+    void verifyDevice(Long userId, DeviceVerifyRequest request, String clientIp, String registrationJti);
     void revokeDevice(UUID deviceId, Long revokedByUserId, String clientIp);
     UserDevice validateSignedRequest(UUID deviceId,
                                      String method,

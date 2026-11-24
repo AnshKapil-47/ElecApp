@@ -40,7 +40,14 @@ public class AuthController {
     @Operation(summary = "Rotate refresh token", description = "Exchange mobile refresh token for new access and rotated refresh token")
     public ResponseEntity<TokenRefreshResponse> refresh(@Valid @RequestBody RefreshTokenRequest request, HttpServletRequest httpRequest) {
         String clientIp = httpRequest.getRemoteAddr();
-        TokenRefreshResponse response = authService.refreshToken(request, clientIp);
+        String xDeviceId = httpRequest.getHeader("X-Device-Id");
+        String xSignature = httpRequest.getHeader("X-Device-Signature");
+        String xTimestamp = httpRequest.getHeader("X-Device-Timestamp");
+        String xNonce = httpRequest.getHeader("X-Device-Nonce");
+        String xCounter = httpRequest.getHeader("X-Device-Counter");
+        String xContextId = httpRequest.getHeader("X-Device-Context-Id");
+        TokenRefreshResponse response = authService.refreshToken(
+                request, clientIp, xDeviceId, xSignature, xTimestamp, xNonce, xCounter, xContextId);
         return ResponseEntity.ok(response);
     }
 
@@ -54,9 +61,9 @@ public class AuthController {
 
     @PostMapping("/activate")
     @Operation(summary = "Activate Customer Account", description = "Activate primary Customer account using Crockford Base32 activation code")
-    public ResponseEntity<Map<String, String>> activate(@Valid @RequestBody CustomerActivateRequest request, HttpServletRequest httpRequest) {
+    public ResponseEntity<com.elecsarthi.dto.response.CustomerActivateResponse> activate(@Valid @RequestBody CustomerActivateRequest request, HttpServletRequest httpRequest) {
         String clientIp = httpRequest.getRemoteAddr();
-        authService.activateCustomer(request, clientIp);
-        return ResponseEntity.ok(Map.of("message", "Customer account activated successfully"));
+        com.elecsarthi.dto.response.CustomerActivateResponse response = authService.activateCustomer(request, clientIp);
+        return ResponseEntity.ok(response);
     }
 }

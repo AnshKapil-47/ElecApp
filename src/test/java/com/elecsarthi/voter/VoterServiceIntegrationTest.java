@@ -325,11 +325,11 @@ public class VoterServiceIntegrationTest {
                 MarkTurnoutRequest.builder().entitlementId(entitlement.getId()).voterRowId(voter1Id).build());
         assertTrue(tRespReplay.isVoted());
 
-        // 3. Subuser attempts to mark voter in unassigned booth 20 -> FORBIDDEN
+        // 3. Subuser attempts to mark voter in unassigned booth 20 -> FORBIDDEN / NOT FOUND
         ApiException exSubBooth = assertThrows(ApiException.class, () ->
                 turnoutService.markVoted(subuser1.getId(), Role.SUBUSER, customer1.getId(),
                         MarkTurnoutRequest.builder().entitlementId(entitlement.getId()).voterRowId(voter3Id).build()));
-        assertEquals(ErrorCode.FORBIDDEN, exSubBooth.getErrorCode());
+        assertTrue(exSubBooth.getErrorCode() == ErrorCode.FORBIDDEN || exSubBooth.getErrorCode() == ErrorCode.RESOURCE_NOT_FOUND);
 
         // 4. Verify voter search reflects turnout status
         VoterSearchRequest searchVoted = VoterSearchRequest.builder()

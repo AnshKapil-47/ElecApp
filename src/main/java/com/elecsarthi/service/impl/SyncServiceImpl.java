@@ -5,30 +5,41 @@ import com.elecsarthi.dto.request.StartSyncSessionRequest;
 import com.elecsarthi.dto.response.SyncChunkResponse;
 import com.elecsarthi.dto.response.SyncSessionResponse;
 import com.elecsarthi.dto.response.VoterSummaryResponse;
+import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.entity.SyncSession;
+import com.elecsarthi.entity.UserDevice;
 import com.elecsarthi.enums.AuditOutcome;
+import com.elecsarthi.enums.DeviceStatus;
 import com.elecsarthi.enums.EntitlementStatus;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.SyncStatus;
+import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
+import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.repository.SyncSessionRepository;
+import com.elecsarthi.repository.UserDeviceRepository;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.SyncService;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
@@ -44,10 +55,14 @@ public class SyncServiceImpl implements SyncService {
     private final SyncSessionRepository syncSessionRepository;
     private final EntitlementRepository entitlementRepository;
     private final ElectionTypeRepository electionTypeRepository;
+    private final AppUserRepository userRepository;
+    private final CustomerAccountRepository customerAccountRepository;
+    private final UserDeviceRepository deviceRepository;
+    private final VoterScopeAuthorizer voterScopeAuthorizer;
     private final AppProperties appProperties;
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final PlatformTransactionManager transactionManager;
 
     private static final int DEFAULT_CHUNK_SIZE = 1000;
 
@@ -74,13 +89,14 @@ public class SyncServiceImpl implements SyncService {
             throw new ApiException(ErrorCode.BAD_REQUEST, "Entitlement is expired or not yet valid", HttpStatus.BAD_REQUEST);
         }
 
-        // Count total voters matching entitlement criteria
-        StringBuilder countSql = new StringBuilder("SELECT COUNT(*) FROM voter v WHERE v.dataset_id = ? ");
-        List<Object> countParams = new ArrayList<>();
-        countParams.add(ent.getDatasetId());
-        applyEntitlementCriteria(countSql, countParams, ent.getCriteria());
+        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
+                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        Long totalRecordsCount = jdbcTemplate.queryForObject(countSql.toString(), Long.class, countParams.toArray());
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, customerUserId, callerRole, "v");
+
+        // Count total voters matching entitlement criteria (Finding 2, 3)
+        String countSql = "SELECT COUNT(*) FROM voter v WHERE " + scope.whereClause();
+        Long totalRecordsCount = jdbcTemplate.queryForObject(countSql, Long.class, scope.params().toArray());
         int totalRecords = (totalRecordsCount != null) ? totalRecordsCount.intValue() : 0;
 
         int chunkSize = DEFAULT_CHUNK_SIZE;
@@ -144,36 +160,83 @@ public class SyncServiceImpl implements SyncService {
             throw new ApiException(ErrorCode.FORBIDDEN, "Session does not belong to this customer account", HttpStatus.FORBIDDEN);
         }
 
+        // Recheck user matches session
+        if (!session.getUserId().equals(customerUserId)) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Sync session was initiated by a different user", HttpStatus.FORBIDDEN);
+        }
+
+        // Revalidate User status is ACTIVE
+        AppUser user = userRepository.findById(customerUserId)
+                .orElseThrow(() -> new ApiException(ErrorCode.FORBIDDEN, "User account not found", HttpStatus.FORBIDDEN));
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "User account is suspended or inactive", HttpStatus.FORBIDDEN);
+        }
+
+        // Revalidate Customer Account status is ACTIVE
+        CustomerAccount customer = customerAccountRepository.findById(customerAccountId)
+                .orElseThrow(() -> new ApiException(ErrorCode.FORBIDDEN, "Customer account not found", HttpStatus.FORBIDDEN));
+        if (customer.getStatus() != UserStatus.ACTIVE) {
+            throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "Customer account is suspended or inactive", HttpStatus.FORBIDDEN);
+        }
+
+        // Revalidate Device status is ACTIVE and matches session device
+        if (session.getDeviceId() == null) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Sync session is not bound to a device", HttpStatus.FORBIDDEN);
+        }
+        UserDevice device = deviceRepository.findById(session.getDeviceId())
+                .orElseThrow(() -> new ApiException(ErrorCode.FORBIDDEN, "Device not found", HttpStatus.FORBIDDEN));
+        if (device.getStatus() != DeviceStatus.ACTIVE) {
+            throw new ApiException(ErrorCode.DEVICE_REVOKED, "Device is revoked or not active", HttpStatus.FORBIDDEN);
+        }
+
         if (session.getStatus() != SyncStatus.ACTIVE) {
             throw new ApiException(ErrorCode.SYNC_SESSION_INVALID, "Sync session is not active (status: " + session.getStatus() + ")", HttpStatus.BAD_REQUEST);
         }
 
-        if (Instant.now().isAfter(session.getExpiresAt())) {
-            session.setStatus(SyncStatus.EXPIRED);
-            syncSessionRepository.save(session);
+        Instant now = Instant.now();
+        if (now.isAfter(session.getExpiresAt())) {
+            // Autonomous commit of expired state via REQUIRES_NEW
+            TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+            txTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            txTemplate.execute(status -> {
+                jdbcTemplate.update("UPDATE sync_session SET status = 'EXPIRED' WHERE id = ?", session.getId());
+                return null;
+            });
             throw new ApiException(ErrorCode.SYNC_SESSION_INVALID, "Sync session has expired", HttpStatus.BAD_REQUEST);
+        }
+
+        // Finding 15: Recheck entitlement status and validity window
+        Entitlement ent = entitlementRepository.findById(session.getEntitlementId())
+                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+
+        if (ent.getStatus() != EntitlementStatus.ACTIVE) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement has been revoked or is inactive", HttpStatus.FORBIDDEN);
+        }
+
+        if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement validity window has expired", HttpStatus.FORBIDDEN);
         }
 
         if (chunkNo < 0 || chunkNo >= session.getTotalChunks()) {
             throw new ApiException(ErrorCode.BAD_REQUEST, "Invalid chunk number: " + chunkNo + " (total: " + session.getTotalChunks() + ")", HttpStatus.BAD_REQUEST);
         }
 
-        Entitlement ent = entitlementRepository.findById(session.getEntitlementId())
-                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId()).orElseThrow();
-        String boothColumn = electionType.getBoothColumn();
+        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
+                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, customerUserId, callerRole, "v");
+        String boothColumn = scope.boothColumn();
 
         int offset = chunkNo * session.getChunkSize();
 
-        StringBuilder sql = new StringBuilder("SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted " +
-                "FROM voter v " +
-                "LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id " +
-                "WHERE v.dataset_id = ? ");
+        StringBuilder sql = new StringBuilder("SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted ")
+                .append("FROM voter v ")
+                .append("LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id ")
+                .append("WHERE ").append(scope.whereClause());
 
         List<Object> params = new ArrayList<>();
         params.add(customerAccountId);
-        params.add(ent.getDatasetId());
-        applyEntitlementCriteria(sql, params, session.getScopeSnapshot());
+        params.addAll(scope.params());
 
         sql.append(" ORDER BY v.").append(boothColumn).append(" ASC, v.serial_no ASC LIMIT ? OFFSET ?");
         params.add(session.getChunkSize());
@@ -186,13 +249,15 @@ public class SyncServiceImpl implements SyncService {
             Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
             Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
 
+            Integer boothValue = rs.getObject(boothColumn, Integer.class);
+
             return VoterSummaryResponse.builder()
                     .id(rs.getLong("id"))
                     .datasetId(rs.getLong("dataset_id"))
                     .voterId(rs.getString("voter_id"))
                     .serialNo(rs.getObject("serial_no", Integer.class))
                     .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(rs.getObject("booth_no", Integer.class))
+                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
                     .firstNameEn(rs.getString("v_fname_en"))
                     .lastNameEn(rs.getString("v_lname_en"))
                     .firstNameMt(rs.getString("v_fname_mt"))
@@ -267,19 +332,6 @@ public class SyncServiceImpl implements SyncService {
                 .build();
     }
 
-    private void applyEntitlementCriteria(StringBuilder whereClause, List<Object> params, String criteriaJson) {
-        try {
-            Map<String, Object> criteria = objectMapper.readValue(criteriaJson, new TypeReference<Map<String, Object>>() {});
-            for (Map.Entry<String, Object> entry : criteria.entrySet()) {
-                String col = entry.getKey().trim().toLowerCase();
-                whereClause.append(" AND v.").append(col).append(" = ? ");
-                params.add(entry.getValue());
-            }
-        } catch (Exception e) {
-            log.error("Failed to parse entitlement criteria JSON", e);
-        }
-    }
-
     private String processMobileNumber(byte[] mobileNoEnc, Role callerRole, boolean entitlementMobileAccess) {
         if (mobileNoEnc == null || mobileNoEnc.length == 0) {
             return null;
@@ -303,10 +355,9 @@ public class SyncServiceImpl implements SyncService {
                 }
             }
         } catch (Exception e) {
-            String raw = new String(mobileNoEnc, StandardCharsets.UTF_8);
-            if (canViewUnmasked) return raw;
-            if (raw.length() >= 4) return "+91*****" + raw.substring(raw.length() - 4);
-            return "+91*****XXXX";
+            // Finding 14: Never serve raw bytes if decryption fails; log warning and return null
+            log.warn("Sync voter mobile decryption failed: {}", e.getMessage());
+            return null;
         }
     }
 }

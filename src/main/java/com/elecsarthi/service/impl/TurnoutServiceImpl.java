@@ -7,7 +7,6 @@ import com.elecsarthi.dto.response.BoothTurnoutStat;
 import com.elecsarthi.dto.response.GenderTurnoutStat;
 import com.elecsarthi.dto.response.TurnoutResponse;
 import com.elecsarthi.dto.response.TurnoutStatisticsResponse;
-import com.elecsarthi.entity.BoothAssignment;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.EntitlementStatus;
@@ -16,12 +15,11 @@ import com.elecsarthi.enums.TurnoutSource;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.repository.BoothAssignmentRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
 import com.elecsarthi.service.TurnoutService;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -31,7 +29,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -40,9 +37,8 @@ public class TurnoutServiceImpl implements TurnoutService {
 
     private final EntitlementRepository entitlementRepository;
     private final ElectionTypeRepository electionTypeRepository;
-    private final BoothAssignmentRepository boothAssignmentRepository;
+    private final VoterScopeAuthorizer voterScopeAuthorizer;
     private final JdbcTemplate jdbcTemplate;
-    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     @Transactional
@@ -55,23 +51,17 @@ public class TurnoutServiceImpl implements TurnoutService {
         ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        String boothColumn = electionType.getBoothColumn();
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
 
-        if (callerRole == Role.SUBUSER) {
-            Set<Integer> allowedBooths = getActiveAssignedBooths(callerUserId, ent.getId());
-            // Verify voter belongs to one of the allowed booths
-            String checkBoothSql = "SELECT " + boothColumn + " FROM voter WHERE dataset_id = ? AND id = ?";
-            List<Integer> voterBooths = jdbcTemplate.query(checkBoothSql, (rs, rowNum) -> rs.getObject(1, Integer.class),
-                    ent.getDatasetId(), request.getVoterRowId());
+        // Verify voter is within the entitlement geographical boundary AND subuser assigned booth (Finding 2, 16)
+        String checkSql = "SELECT 1 FROM voter v WHERE v.id = ? AND " + scope.whereClause();
+        List<Object> checkParams = new ArrayList<>();
+        checkParams.add(request.getVoterRowId());
+        checkParams.addAll(scope.params());
 
-            if (voterBooths.isEmpty()) {
-                throw new ResourceNotFoundException("Voter not found with ID: " + request.getVoterRowId());
-            }
-
-            Integer voterBooth = voterBooths.get(0);
-            if (voterBooth == null || !allowedBooths.contains(voterBooth)) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Subusers can only mark turnout in assigned booths", HttpStatus.FORBIDDEN);
-            }
+        List<Integer> matches = jdbcTemplate.query(checkSql, (rs, rowNum) -> 1, checkParams.toArray());
+        if (matches.isEmpty()) {
+            throw new ResourceNotFoundException("Voter not found in entitlement area or assigned booth: " + request.getVoterRowId());
         }
 
         Instant now = Instant.now();
@@ -99,9 +89,23 @@ public class TurnoutServiceImpl implements TurnoutService {
         }
 
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
+        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
+                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        String deleteSql = "DELETE FROM voter_turnout WHERE dataset_id = ? AND customer_account_id = ? AND voter_row_id = ?";
-        jdbcTemplate.update(deleteSql, ent.getDatasetId(), customerAccountId, request.getVoterRowId());
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
+
+        // Scoped deletion: only unmark if voter belongs to this customer's entitlement area
+        String deleteSql = "DELETE FROM voter_turnout vt WHERE vt.dataset_id = ? AND vt.customer_account_id = ? AND vt.voter_row_id = ? " +
+                "AND vt.voter_row_id IN (SELECT v.id FROM voter v WHERE v.id = ? AND " + scope.whereClause() + ")";
+
+        List<Object> deleteParams = new ArrayList<>();
+        deleteParams.add(ent.getDatasetId());
+        deleteParams.add(customerAccountId);
+        deleteParams.add(request.getVoterRowId());
+        deleteParams.add(request.getVoterRowId());
+        deleteParams.addAll(scope.params());
+
+        jdbcTemplate.update(deleteSql, deleteParams.toArray());
         log.info("Turnout unmarked for dataset={}, customer={}, voter={}", ent.getDatasetId(), customerAccountId, request.getVoterRowId());
     }
 
@@ -116,16 +120,25 @@ public class TurnoutServiceImpl implements TurnoutService {
         ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        String boothColumn = electionType.getBoothColumn();
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
+
+        // Finding 16: Ensure turnout reset is strictly limited to this entitlement area, never across other ACs
+        StringBuilder deleteSql = new StringBuilder("DELETE FROM voter_turnout vt WHERE vt.dataset_id = ? AND vt.customer_account_id = ? ")
+                .append("AND vt.voter_row_id IN (SELECT v.id FROM voter v WHERE ").append(scope.whereClause());
+
+        List<Object> params = new ArrayList<>();
+        params.add(ent.getDatasetId());
+        params.add(customerAccountId);
+        params.addAll(scope.params());
 
         if (request.getBoothNo() != null) {
-            String sql = "DELETE FROM voter_turnout vt WHERE vt.dataset_id = ? AND vt.customer_account_id = ? " +
-                    "AND vt.voter_row_id IN (SELECT v.id FROM voter v WHERE v.dataset_id = ? AND v." + boothColumn + " = ?)";
-            jdbcTemplate.update(sql, ent.getDatasetId(), customerAccountId, ent.getDatasetId(), request.getBoothNo());
-        } else {
-            String sql = "DELETE FROM voter_turnout WHERE dataset_id = ? AND customer_account_id = ?";
-            jdbcTemplate.update(sql, ent.getDatasetId(), customerAccountId);
+            deleteSql.append(" AND v.").append(scope.boothColumn()).append(" = ?");
+            params.add(request.getBoothNo());
         }
+        deleteSql.append(")");
+
+        jdbcTemplate.update(deleteSql.toString(), params.toArray());
+        log.info("Turnout reset for entitlement={}, booth={}", ent.getId(), request.getBoothNo());
     }
 
     @Override
@@ -139,40 +152,21 @@ public class TurnoutServiceImpl implements TurnoutService {
         ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        String boothColumn = electionType.getBoothColumn();
-        Set<Integer> allowedBooths = null;
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
+        String boothColumn = scope.boothColumn();
 
-        if (callerRole == Role.SUBUSER) {
-            allowedBooths = getActiveAssignedBooths(callerUserId, ent.getId());
-            if (boothNo != null && !allowedBooths.contains(boothNo)) {
+        if (callerRole == Role.SUBUSER && boothNo != null) {
+            if (scope.allowedBooths() != null && !scope.allowedBooths().contains(boothNo)) {
                 throw new ApiException(ErrorCode.FORBIDDEN, "Access to unassigned booth statistics is forbidden", HttpStatus.FORBIDDEN);
             }
         }
 
-        StringBuilder whereSql = new StringBuilder(" WHERE v.dataset_id = ? ");
-        List<Object> params = new ArrayList<>();
-        params.add(ent.getDatasetId());
-
-        applyEntitlementCriteria(whereSql, params, ent.getCriteria());
+        StringBuilder whereSql = new StringBuilder(" WHERE ").append(scope.whereClause());
+        List<Object> params = new ArrayList<>(scope.params());
 
         if (boothNo != null) {
             whereSql.append(" AND v.").append(boothColumn).append(" = ? ");
             params.add(boothNo);
-        } else if (allowedBooths != null) {
-            if (allowedBooths.isEmpty()) {
-                return TurnoutStatisticsResponse.builder()
-                        .entitlementId(entitlementId)
-                        .scopeLabel(ent.getScopeLabel())
-                        .totalVoters(0)
-                        .totalVoted(0)
-                        .turnoutPercentage(0.0)
-                        .boothBreakdown(Collections.emptyList())
-                        .genderBreakdown(Collections.emptyList())
-                        .build();
-            }
-            whereSql.append(" AND v.").append(boothColumn).append(" IN (")
-                    .append(allowedBooths.stream().map(String::valueOf).collect(Collectors.joining(",")))
-                    .append(") ");
         }
 
         // Total Voters
@@ -273,27 +267,5 @@ public class TurnoutServiceImpl implements TurnoutService {
         }
 
         return ent;
-    }
-
-    private Set<Integer> getActiveAssignedBooths(Long subuserId, Long entitlementId) {
-        Instant now = Instant.now();
-        List<BoothAssignment> assignments = boothAssignmentRepository.findActiveAssignmentsForSubuserAndEntitlement(subuserId, entitlementId, now);
-        if (assignments.isEmpty()) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subuser has no active booth assignment for this entitlement", HttpStatus.FORBIDDEN);
-        }
-        return assignments.stream().map(BoothAssignment::getBoothValue).collect(Collectors.toSet());
-    }
-
-    private void applyEntitlementCriteria(StringBuilder whereClause, List<Object> params, String criteriaJson) {
-        try {
-            Map<String, Object> criteria = objectMapper.readValue(criteriaJson, new TypeReference<Map<String, Object>>() {});
-            for (Map.Entry<String, Object> entry : criteria.entrySet()) {
-                String col = entry.getKey().trim().toLowerCase();
-                whereClause.append(" AND v.").append(col).append(" = ? ");
-                params.add(entry.getValue());
-            }
-        } catch (Exception e) {
-            log.error("Failed to parse entitlement criteria JSON", e);
-        }
     }
 }

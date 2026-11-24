@@ -22,17 +22,24 @@ import com.elecsarthi.repository.UserSessionRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.security.jwt.JwtTokenProvider;
 import com.elecsarthi.security.service.ElecSarthiUserPrincipal;
+import com.elecsarthi.security.service.RateLimiterService;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.AuthService;
+import com.elecsarthi.service.DeviceService;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
@@ -50,6 +57,10 @@ public class AuthServiceImpl implements AuthService {
     private final AuditService auditService;
     private final AppProperties appProperties;
     private final Clock clock;
+    private final RateLimiterService rateLimiterService;
+    private final JdbcTemplate jdbcTemplate;
+    private final PlatformTransactionManager transactionManager;
+    private final DeviceService deviceService;
     private final SecureRandom secureRandom = new SecureRandom();
 
     public AuthServiceImpl(AppUserRepository userRepository,
@@ -60,7 +71,11 @@ public class AuthServiceImpl implements AuthService {
                            JwtTokenProvider tokenProvider,
                            AuditService auditService,
                            AppProperties appProperties,
-                           Clock clock) {
+                           Clock clock,
+                           RateLimiterService rateLimiterService,
+                           JdbcTemplate jdbcTemplate,
+                           PlatformTransactionManager transactionManager,
+                           DeviceService deviceService) {
         this.userRepository = userRepository;
         this.customerAccountRepository = customerAccountRepository;
         this.deviceRepository = deviceRepository;
@@ -70,11 +85,19 @@ public class AuthServiceImpl implements AuthService {
         this.auditService = auditService;
         this.appProperties = appProperties;
         this.clock = clock;
+        this.rateLimiterService = rateLimiterService;
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionManager = transactionManager;
+        this.deviceService = deviceService;
     }
 
     @Override
     @Transactional
     public LoginResponse login(LoginRequest request, String clientIp) {
+        // Finding 18: Rate limit login attempts per IP and per identifier
+        rateLimiterService.checkRateLimit("login_ip", clientIp, 30);
+        rateLimiterService.checkRateLimit("login_id", request.getIdentifier(), 15);
+
         Instant now = clock.instant();
 
         // 1. Resolve user by identifier (username or contact_phone)
@@ -104,7 +127,14 @@ public class AuthServiceImpl implements AuthService {
         // Lock user row for atomic session limit enforcement
         user = userRepository.findByIdForUpdate(user.getId()).orElse(user);
 
-        // Verify user status
+        // Verify password first to prevent user enumeration
+        if (user.getPasswordHash() == null || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
+            auditService.log(user.getId(), user.getCustomerAccountId(), null, null, "LOGIN", AuditOutcome.DENIED,
+                    "app_user", user.getUsername(), "{\"reason\":\"Bad credentials\"}", clientIp);
+            throw new ApiException(ErrorCode.UNAUTHORIZED, "Invalid username or password.", HttpStatus.UNAUTHORIZED);
+        }
+
+        // Verify user status after password matches
         if (user.getStatus() == UserStatus.PENDING) {
             throw new ApiException(ErrorCode.ACCOUNT_PENDING_ACTIVATION, "Account is pending activation.", HttpStatus.FORBIDDEN);
         }
@@ -121,13 +151,6 @@ public class AuthServiceImpl implements AuthService {
             }
         }
 
-        // Verify password
-        if (user.getPasswordHash() == null || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
-            auditService.log(user.getId(), user.getCustomerAccountId(), null, null, "LOGIN", AuditOutcome.DENIED,
-                    "app_user", user.getUsername(), "{\"reason\":\"Bad password\"}", clientIp);
-            throw new ApiException(ErrorCode.UNAUTHORIZED, "Invalid username or password.", HttpStatus.UNAUTHORIZED);
-        }
-
         // Enforce client separation
         if (request.getClientType() == ClientType.WEB) {
             if (user.getRole() != Role.OWNER && user.getRole() != Role.SUBOWNER) {
@@ -139,15 +162,27 @@ public class AuthServiceImpl implements AuthService {
             }
         }
 
-        // For mobile roles, verify registered active device
+        // For mobile roles, check registered active device (device registration bootstrap)
         UserDevice userDevice = null;
         if (request.getClientType() == ClientType.MOBILE) {
+            Optional<UserDevice> activeDevOpt = deviceRepository.findByUserIdAndStatus(user.getId(), DeviceStatus.ACTIVE);
+            if (activeDevOpt.isEmpty() || (request.getInstallationId() != null && !request.getInstallationId().isBlank() && !activeDevOpt.get().getInstallationId().equals(request.getInstallationId()))) {
+                // Deadlock-free device bootstrap: issue short-lived, single-use registration token
+                String regToken = tokenProvider.generateRegistrationToken(user.getId(), user.getUsername(), user.getRole(), user.getCustomerAccountId());
+                return LoginResponse.builder()
+                        .userId(user.getId())
+                        .username(user.getUsername())
+                        .fullName(user.getFullName())
+                        .role(user.getRole())
+                        .customerAccountId(user.getCustomerAccountId())
+                        .clientType(ClientType.MOBILE)
+                        .deviceRegistrationRequired(true)
+                        .registrationToken(regToken)
+                        .mustChangePassword(user.isMustChangePassword())
+                        .build();
+            }
             if (request.getInstallationId() == null || request.getInstallationId().isBlank()) {
                 throw new ApiException(ErrorCode.BAD_REQUEST, "Device installation ID is required for mobile login.", HttpStatus.BAD_REQUEST);
-            }
-            Optional<UserDevice> activeDevOpt = deviceRepository.findByUserIdAndStatus(user.getId(), DeviceStatus.ACTIVE);
-            if (activeDevOpt.isEmpty() || !activeDevOpt.get().getInstallationId().equals(request.getInstallationId())) {
-                throw new ApiException(ErrorCode.DEVICE_PENDING_VERIFICATION, "Device is not registered or not active.", HttpStatus.FORBIDDEN);
             }
             userDevice = activeDevOpt.get();
         }
@@ -158,12 +193,26 @@ public class AuthServiceImpl implements AuthService {
             case AGENT, CUSTOMER, SUBUSER -> 1;
         };
 
+        // Terminate expired sessions before enforcing limit (Finding 7)
         List<UserSession> activeSessions = sessionRepository.findByUserIdAndStatus(user.getId(), SessionStatus.ACTIVE);
-        if (activeSessions.size() >= maxSessions) {
+        List<UserSession> trulyActiveSessions = new ArrayList<>();
+        for (UserSession s : activeSessions) {
+            boolean expired = s.getAbsoluteExpiresAt().isBefore(now) || (s.getIdleExpiresAt() != null && s.getIdleExpiresAt().isBefore(now));
+            if (expired) {
+                s.setStatus(SessionStatus.TERMINATED);
+                s.setTerminatedAt(now);
+                s.setTerminationReason(s.getAbsoluteExpiresAt().isBefore(now) ? "ABSOLUTE_EXPIRED" : "IDLE_EXPIRED");
+                sessionRepository.save(s);
+            } else {
+                trulyActiveSessions.add(s);
+            }
+        }
+
+        if (trulyActiveSessions.size() >= maxSessions) {
             // Check same device replacement exception for mobile
             if (userDevice != null) {
                 final UUID activeDevId = userDevice.getId();
-                Optional<UserSession> sameDeviceSession = activeSessions.stream()
+                Optional<UserSession> sameDeviceSession = trulyActiveSessions.stream()
                         .filter(s -> activeDevId.equals(s.getDeviceId()))
                         .findFirst();
                 if (sameDeviceSession.isPresent()) {
@@ -251,6 +300,17 @@ public class AuthServiceImpl implements AuthService {
     @Override
     @Transactional(noRollbackFor = {ApiException.class})
     public TokenRefreshResponse refreshToken(RefreshTokenRequest request, String clientIp) {
+        return refreshToken(request, clientIp, null, null, null, null, null, null);
+    }
+
+    @Override
+    @Transactional(noRollbackFor = {ApiException.class})
+    public TokenRefreshResponse refreshToken(RefreshTokenRequest request, String clientIp, String deviceIdHeader,
+                                             String deviceSignature, String deviceTimestamp, String deviceNonce,
+                                             String deviceCounter, String deviceContextId) {
+        // Finding 18: Rate limit refresh token requests per IP
+        rateLimiterService.checkRateLimit("refresh_ip", clientIp, 60);
+
         Instant now = clock.instant();
 
         // Wire format: sid.generation.secret
@@ -305,19 +365,78 @@ public class AuthServiceImpl implements AuthService {
             throw new ApiException(ErrorCode.UNAUTHORIZED, "Session expired. Please log in again.", HttpStatus.UNAUTHORIZED);
         }
 
-        // Verify user and device still active
+        // Verify user still active
         AppUser user = userRepository.findById(session.getUserId())
                 .orElseThrow(() -> new ApiException(ErrorCode.UNAUTHORIZED, "User not found.", HttpStatus.UNAUTHORIZED));
         if (user.getStatus() != UserStatus.ACTIVE) {
             throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "User account is suspended.", HttpStatus.UNAUTHORIZED);
         }
 
-        if (session.getDeviceId() != null) {
-            UserDevice device = deviceRepository.findById(session.getDeviceId()).orElse(null);
-            if (device == null || device.getStatus() != DeviceStatus.ACTIVE) {
-                throw new ApiException(ErrorCode.DEVICE_REVOKED, "Device revoked.", HttpStatus.UNAUTHORIZED);
-            }
+        // Refresh tokens are strictly restricted to mobile sessions
+        if (session.getClientType() != ClientType.MOBILE || session.getDeviceId() == null) {
+            throw new ApiException(ErrorCode.UNAUTHORIZED, "Refresh tokens are only supported for mobile sessions.", HttpStatus.UNAUTHORIZED);
         }
+
+        // Mandatory device proof headers for mobile refresh
+        if (deviceIdHeader == null || deviceIdHeader.isBlank()) {
+            throw new ApiException(ErrorCode.UNAUTHORIZED, "Missing required X-Device-Id header.", HttpStatus.UNAUTHORIZED);
+        }
+        if (deviceSignature == null || deviceSignature.isBlank()) {
+            throw new ApiException(ErrorCode.INVALID_DEVICE_SIGNATURE, "Missing required X-Device-Signature header.", HttpStatus.UNAUTHORIZED);
+        }
+        if (deviceTimestamp == null || deviceTimestamp.isBlank()) {
+            throw new ApiException(ErrorCode.INVALID_DEVICE_SIGNATURE, "Missing required X-Device-Timestamp header.", HttpStatus.UNAUTHORIZED);
+        }
+        if (deviceNonce == null || deviceNonce.isBlank()) {
+            throw new ApiException(ErrorCode.INVALID_DEVICE_SIGNATURE, "Missing required X-Device-Nonce header.", HttpStatus.UNAUTHORIZED);
+        }
+        if (deviceCounter == null || deviceCounter.isBlank()) {
+            throw new ApiException(ErrorCode.INVALID_DEVICE_SIGNATURE, "Missing required X-Device-Counter header.", HttpStatus.UNAUTHORIZED);
+        }
+
+        // 1. Verify supplied device ID matches session's registered device
+        UUID presentedDevId;
+        try {
+            presentedDevId = UUID.fromString(deviceIdHeader.trim());
+        } catch (IllegalArgumentException e) {
+            throw new ApiException(ErrorCode.UNAUTHORIZED, "Invalid device ID format.", HttpStatus.UNAUTHORIZED);
+        }
+        if (!session.getDeviceId().equals(presentedDevId)) {
+            auditService.log(session.getUserId(), null, null, session.getDeviceId(),
+                    "REFRESH_DEVICE_MISMATCH", AuditOutcome.DENIED, "user_session", sessionId.toString(),
+                    "{\"presentedDeviceId\":\"" + deviceIdHeader + "\"}", clientIp);
+            throw new ApiException(ErrorCode.UNAUTHORIZED, "Refresh token is bound to a different device.", HttpStatus.UNAUTHORIZED);
+        }
+
+        // 2. Bound device must exist and be ACTIVE
+        UserDevice device = deviceRepository.findById(session.getDeviceId()).orElse(null);
+        if (device == null || device.getStatus() != DeviceStatus.ACTIVE) {
+            throw new ApiException(ErrorCode.DEVICE_REVOKED, "Device revoked or inactive.", HttpStatus.UNAUTHORIZED);
+        }
+
+        // 3. Parse timestamp and counter
+        long ts;
+        long counter;
+        try {
+            ts = Long.parseLong(deviceTimestamp.trim());
+            counter = Long.parseLong(deviceCounter.trim());
+        } catch (NumberFormatException e) {
+            throw new ApiException(ErrorCode.BAD_REQUEST, "Malformed timestamp or counter format.", HttpStatus.BAD_REQUEST);
+        }
+
+        // 4. Validate cryptographic ECDSA P-256 signature, window, monotonic counter, nonce uniqueness
+        byte[] body = request.getRefreshToken().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        deviceService.validateSignedRequest(
+                session.getDeviceId(),
+                "POST",
+                "/api/v1/auth/refresh",
+                body,
+                ts,
+                deviceNonce.trim(),
+                counter,
+                deviceContextId,
+                deviceSignature.trim()
+        );
 
         // Rotate token: increment generation and generate new secret
         int nextGen = presentedGen + 1;
@@ -370,7 +489,11 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
-    public void activateCustomer(CustomerActivateRequest request, String clientIp) {
+    public com.elecsarthi.dto.response.CustomerActivateResponse activateCustomer(CustomerActivateRequest request, String clientIp) {
+        // Finding 18: Rate limit activation requests per IP and per phone
+        rateLimiterService.checkRateLimit("activate_ip", clientIp, 20);
+        rateLimiterService.checkRateLimit("activate_phone", request.getContactPhone(), 10);
+
         Instant now = clock.instant();
 
         CustomerAccount customer = customerAccountRepository.findByContactPhone(request.getContactPhone())
@@ -380,7 +503,8 @@ public class AuthServiceImpl implements AuthService {
             throw new ApiException(ErrorCode.BAD_REQUEST, "Customer account is already activated.", HttpStatus.BAD_REQUEST);
         }
 
-        if (customer.getActivationAttemptCount() >= appProperties.getSecurity().getActivationMaxAttempts()) {
+        int maxAttempts = appProperties.getSecurity().getActivationMaxAttempts();
+        if (customer.getActivationAttemptCount() >= maxAttempts) {
             throw new ApiException(ErrorCode.ACTIVATION_MAX_ATTEMPTS_EXCEEDED, "Activation locked. Maximum attempts exceeded. Re-issue required.", HttpStatus.FORBIDDEN);
         }
 
@@ -391,13 +515,20 @@ public class AuthServiceImpl implements AuthService {
         // Verify HMAC-SHA-256 with pepper
         String expectedHash = CryptoUtils.hmacSha256Hex(request.getActivationCode().toUpperCase(), appProperties.getSecurity().getActivationPepper());
         if (!expectedHash.equalsIgnoreCase(customer.getActivationCodeHash())) {
-            customer.setActivationAttemptCount((short) (customer.getActivationAttemptCount() + 1));
-            customerAccountRepository.save(customer);
+            short newAttempts = (short) (customer.getActivationAttemptCount() + 1);
 
-            auditService.log(null, customer.getId(), null, null, "CUSTOMER_ACTIVATE", AuditOutcome.DENIED,
-                    "customer_account", customer.getId().toString(), "{\"reason\":\"Invalid code attempt\"}", clientIp);
+            // Dedicated REQUIRES_NEW transaction so lockout and audit survive exception without broad noRollbackFor
+            TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+            txTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            txTemplate.execute(status -> {
+                jdbcTemplate.update("UPDATE customer_account SET activation_attempt_count = ? WHERE id = ?", newAttempts, customer.getId());
+                auditService.log(null, customer.getId(), null, null, "CUSTOMER_ACTIVATE", AuditOutcome.DENIED,
+                        "customer_account", customer.getId().toString(), "{\"reason\":\"Invalid code attempt\"}", clientIp);
+                return null;
+            });
 
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Invalid activation code. Attempts remaining: " + (5 - customer.getActivationAttemptCount()), HttpStatus.BAD_REQUEST);
+            int remaining = Math.max(0, maxAttempts - newAttempts);
+            throw new ApiException(ErrorCode.BAD_REQUEST, "Invalid activation code. Attempts remaining: " + remaining, HttpStatus.BAD_REQUEST);
         }
 
         // Activation success: activate customer and primary user
@@ -409,14 +540,23 @@ public class AuthServiceImpl implements AuthService {
 
         // Find primary customer user
         Optional<AppUser> primaryUserOpt = userRepository.findByCustomerAccountIdAndRole(customer.getId(), Role.CUSTOMER);
-        if (primaryUserOpt.isPresent()) {
-            AppUser primary = primaryUserOpt.get();
-            primary.setPasswordHash(passwordEncoder.encode(request.getPassword()));
-            primary.setStatus(UserStatus.ACTIVE);
-            userRepository.save(primary);
-        }
+        AppUser primary = primaryUserOpt.orElseThrow(() -> new ResourceNotFoundException("Primary customer user not found"));
+        primary.setPasswordHash(passwordEncoder.encode(request.getPassword()));
+        primary.setStatus(UserStatus.ACTIVE);
+        userRepository.save(primary);
 
         auditService.log(null, customer.getId(), null, null, "CUSTOMER_ACTIVATE", AuditOutcome.SUCCESS,
                 "customer_account", customer.getId().toString(), null, clientIp);
+
+        // Single-use device registration token to bootstrap first device enrollment
+        String regToken = tokenProvider.generateRegistrationToken(primary.getId(), primary.getUsername(), primary.getRole(), customer.getId());
+
+        return com.elecsarthi.dto.response.CustomerActivateResponse.builder()
+                .message("Customer account activated successfully")
+                .registrationToken(regToken)
+                .userId(primary.getId())
+                .role(primary.getRole())
+                .customerAccountId(customer.getId())
+                .build();
     }
 }

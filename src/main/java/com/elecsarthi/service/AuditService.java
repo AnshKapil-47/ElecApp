@@ -2,6 +2,7 @@ package com.elecsarthi.service;
 
 import com.elecsarthi.enums.AuditOutcome;
 
+import java.util.Map;
 import java.util.UUID;
 
 public interface AuditService {
@@ -15,4 +16,15 @@ public interface AuditService {
              String targetId,
              String details,
              String ipAddress);
+
+    void logDetails(Long actorUserId,
+                    Long customerAccountId,
+                    Long datasetId,
+                    UUID deviceId,
+                    String actionType,
+                    AuditOutcome outcome,
+                    String targetEntity,
+                    String targetId,
+                    Map<String, Object> detailsMap,
+                    String ipAddress);
 }

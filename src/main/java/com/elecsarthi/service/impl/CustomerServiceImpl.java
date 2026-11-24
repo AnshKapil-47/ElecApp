@@ -29,6 +29,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -50,6 +51,7 @@ public class CustomerServiceImpl implements CustomerService {
     private final CustomerMapper customerMapper;
     private final AppProperties appProperties;
     private final Clock clock;
+    private final JdbcTemplate jdbcTemplate;
 
     private static final String CROCKFORD_CHARS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     private final SecureRandom secureRandom = new SecureRandom();
@@ -201,6 +203,12 @@ public class CustomerServiceImpl implements CustomerService {
                 sessionRepository.save(s);
             }
         }
+
+        // Cascade-revoke all active offline leases for this customer
+        jdbcTemplate.update(
+                "UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? " +
+                "WHERE booth_assignment_id IN (SELECT id FROM booth_assignment WHERE customer_account_id = ?) AND revoked_at IS NULL",
+                java.sql.Timestamp.from(now), callerUserId, customerId);
 
         auditService.log(callerUserId, customer.getId(), null, null, "CUSTOMER_SUSPEND", AuditOutcome.SUCCESS,
                 "customer_account", customer.getId().toString(), "{\"reason\":\"" + reason + "\"}", null);

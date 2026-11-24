@@ -23,9 +23,11 @@ import java.util.UUID;
 public class DeviceController {
 
     private final DeviceService deviceService;
+    private final com.elecsarthi.security.jwt.JwtTokenProvider tokenProvider;
 
-    public DeviceController(DeviceService deviceService) {
+    public DeviceController(DeviceService deviceService, com.elecsarthi.security.jwt.JwtTokenProvider tokenProvider) {
         this.deviceService = deviceService;
+        this.tokenProvider = tokenProvider;
     }
 
     @PostMapping("/register")
@@ -46,7 +48,8 @@ public class DeviceController {
                                                             @Valid @RequestBody DeviceVerifyRequest request,
                                                             HttpServletRequest httpRequest) {
         String clientIp = httpRequest.getRemoteAddr();
-        deviceService.verifyDevice(principal.getUserId(), request, clientIp);
+        String regJti = (String) httpRequest.getAttribute("registration_jti");
+        deviceService.verifyDevice(principal.getUserId(), request, clientIp, regJti);
         return ResponseEntity.ok(Map.of("message", "Device verified and activated successfully"));
     }
 

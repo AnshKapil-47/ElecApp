@@ -18,10 +18,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -117,6 +119,11 @@ public class EntitlementServiceImpl implements EntitlementService {
 
         entitlement = entitlementRepository.save(entitlement);
 
+        // Update LONG_TERM dataset delete_after to max(validUntil) + 30 days
+        if (request.getStorageTier() == DatasetTier.LONG_TERM) {
+            recomputeLongTermRetention(dataset.getId(), now);
+        }
+
         auditService.log(callerUserId, customer.getId(), entitlement.getDatasetId(), null,
                 "DIRECT_ENTITLEMENT_CREATED", AuditOutcome.SUCCESS,
                 "entitlement", entitlement.getId().toString(),
@@ -208,6 +215,65 @@ public class EntitlementServiceImpl implements EntitlementService {
         return mapToResponse(entitlement, electionType);
     }
 
+    @Override
+    @Transactional
+    public EntitlementResponse revokeEntitlement(Long callerUserId, Role callerRole, Long entitlementId, String reason) {
+        if (callerRole != Role.OWNER && callerRole != Role.SUBOWNER) {
+            throw new ApiException(ErrorCode.FORBIDDEN, "Only OWNER or SUBOWNER can revoke entitlements", HttpStatus.FORBIDDEN);
+        }
+
+        Entitlement entitlement = entitlementRepository.findById(entitlementId)
+                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+
+        if (entitlement.getStatus() == EntitlementStatus.REVOKED) {
+            throw new ApiException(ErrorCode.BAD_REQUEST, "Entitlement is already revoked", HttpStatus.BAD_REQUEST);
+        }
+
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        entitlement.setStatus(EntitlementStatus.REVOKED);
+        entitlement.setRevokedAt(now);
+        entitlement.setRevokeReason(reason != null && !reason.isBlank() ? reason : "Revoked by " + callerRole.name());
+        entitlement.setRevokedByUserId(callerUserId);
+        entitlement = entitlementRepository.saveAndFlush(entitlement);
+
+        // Cascade-revoke offline leases for booth assignments under this entitlement
+        jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? " +
+                "WHERE booth_assignment_id IN (SELECT id FROM booth_assignment WHERE entitlement_id = ?) AND revoked_at IS NULL",
+                Timestamp.from(now), callerUserId, entitlementId);
+
+        // Recompute delete_after for LONG_TERM dataset
+        recomputeLongTermRetention(entitlement.getDatasetId(), now);
+
+        // Increment customer's mobile access policy version
+        customerAccountRepository.findById(entitlement.getCustomerAccountId()).ifPresent(ca -> {
+            ca.setMobileAccessPolicyVersion(ca.getMobileAccessPolicyVersion() + 1);
+            customerAccountRepository.save(ca);
+        });
+
+        auditService.log(callerUserId, entitlement.getCustomerAccountId(), entitlement.getDatasetId(), null,
+                "DIRECT_ENTITLEMENT_REVOKED", AuditOutcome.SUCCESS,
+                "entitlement", entitlement.getId().toString(),
+                "{\"reason\":\"" + entitlement.getRevokeReason() + "\"}", null);
+
+        ElectionType electionType = electionTypeRepository.findById(entitlement.getElectionTypeId()).orElse(null);
+        return mapToResponse(entitlement, electionType);
+    }
+
+    public void recomputeLongTermRetention(Long datasetId, Instant now) {
+        datasetRepository.findById(datasetId).ifPresent(ds -> {
+            if (ds.getStorageTier() == DatasetTier.LONG_TERM) {
+                String maxSql = "SELECT MAX(valid_until) FROM entitlement WHERE dataset_id = ? AND status = 'ACTIVE'";
+                Timestamp maxTs = jdbcTemplate.queryForObject(maxSql, Timestamp.class, datasetId);
+                Instant recomputed = (maxTs != null)
+                        ? maxTs.toInstant().plus(30, ChronoUnit.DAYS)
+                        : now.plus(30, ChronoUnit.DAYS);
+                ds.setDeleteAfter(recomputed);
+                datasetRepository.save(ds);
+                log.info("Recomputed LONG_TERM dataset {} delete_after to {}", datasetId, recomputed);
+            }
+        });
+    }
+
     private Dataset resolveDataset(DatasetTier tier, Map<String, Object> criteriaMap) {
         StringBuilder sql = new StringBuilder("SELECT DISTINCT v.dataset_id FROM voter v " +
                 "JOIN dataset d ON d.id = v.dataset_id " +
@@ -232,8 +298,12 @@ public class EntitlementServiceImpl implements EntitlementService {
         }
 
         Long datasetId = matchingDatasetIds.get(0);
-        return datasetRepository.findById(datasetId)
+        Dataset dataset = datasetRepository.findByIdForUpdate(datasetId)
                 .orElseThrow(() -> new ResourceNotFoundException("Resolved dataset not found: " + datasetId));
+        if (dataset.getStatus() != DatasetStatus.IMPORTED) {
+            throw new ApiException(ErrorCode.AREA_UNAVAILABLE, "Dataset is not in IMPORTED state: " + dataset.getStatus(), HttpStatus.BAD_REQUEST);
+        }
+        return dataset;
     }
 
     private void checkAmbiguity(ElectionType electionType, Long datasetId, Map<String, Object> criteriaMap) {

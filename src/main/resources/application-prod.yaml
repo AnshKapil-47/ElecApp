@@ -11,6 +11,10 @@ spring:
   jpa:
     hibernate:
       ddl-auto: validate
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 210MB
   flyway:
     enabled: false # In production, migrations run via migration pipeline
 
@@ -19,6 +23,8 @@ server:
   ssl:
     enabled: ${SSL_ENABLED:false} # Defaults to false when TLS is terminated at reverse proxy (TLS Option B)
   forward-headers-strategy: native
+  tomcat:
+    max-swallow-size: 210MB
 
 elecsarthi:
   mobile-numbers-enabled: ${MOBILE_NUMBERS_ENABLED:false}

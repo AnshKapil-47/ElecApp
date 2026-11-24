@@ -24,6 +24,7 @@ import com.elecsarthi.security.signing.DeviceSignatureVerifier;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.DeviceService;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -46,6 +47,8 @@ public class DeviceServiceImpl implements DeviceService {
     private final DeviceSignatureVerifier deviceSignatureVerifier;
     private final AuditService auditService;
     private final AppProperties appProperties;
+    private final JdbcTemplate jdbcTemplate;
+    private final com.elecsarthi.security.jwt.JwtTokenProvider tokenProvider;
     private final Clock clock;
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -56,6 +59,8 @@ public class DeviceServiceImpl implements DeviceService {
                              DeviceSignatureVerifier deviceSignatureVerifier,
                              AuditService auditService,
                              AppProperties appProperties,
+                             JdbcTemplate jdbcTemplate,
+                             com.elecsarthi.security.jwt.JwtTokenProvider tokenProvider,
                              Clock clock) {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
@@ -64,6 +69,8 @@ public class DeviceServiceImpl implements DeviceService {
         this.deviceSignatureVerifier = deviceSignatureVerifier;
         this.auditService = auditService;
         this.appProperties = appProperties;
+        this.jdbcTemplate = jdbcTemplate;
+        this.tokenProvider = tokenProvider;
         this.clock = clock;
     }
 
@@ -120,7 +127,7 @@ public class DeviceServiceImpl implements DeviceService {
 
         return DeviceRegisterResponse.builder()
                 .deviceId(device.getId())
-                .challenge(base64Challenge)
+                .challenge(challengeHash)
                 .expiresAt(expiresAt)
                 .build();
     }
@@ -128,6 +135,22 @@ public class DeviceServiceImpl implements DeviceService {
     @Override
     @Transactional
     public void verifyDevice(Long userId, DeviceVerifyRequest request, String clientIp) {
+        verifyDevice(userId, request, clientIp, null);
+    }
+
+    @Override
+    @Transactional
+    public void verifyDevice(Long userId, DeviceVerifyRequest request, String clientIp, String registrationJti) {
+        // Concurrency-safe atomic token invalidation across replicas:
+        // Serialize concurrent attempts for the same registration token via PostgreSQL transaction-scoped advisory lock
+        if (registrationJti != null && !registrationJti.isBlank()) {
+            String lockKey = "reg_jti_" + registrationJti.trim();
+            jdbcTemplate.query("SELECT pg_advisory_xact_lock(hashtext(?))", rs -> null, lockKey);
+            if (tokenProvider.isRegistrationJtiInvalid(registrationJti.trim())) {
+                throw new ApiException(ErrorCode.UNAUTHORIZED, "Registration token has already been consumed or invalidated.", HttpStatus.UNAUTHORIZED);
+            }
+        }
+
         UserDevice pendingDevice = deviceRepository.findById(request.getDeviceId())
                 .orElseThrow(() -> new ResourceNotFoundException("Device not found"));
 
@@ -176,6 +199,11 @@ public class DeviceServiceImpl implements DeviceService {
         pendingDevice.setChallengeExpiresAt(null);
         deviceRepository.save(pendingDevice);
 
+        // Consume registration token atomically within the same database transaction
+        if (registrationJti != null && !registrationJti.isBlank()) {
+            tokenProvider.invalidateRegistrationJti(registrationJti.trim());
+        }
+
         auditService.log(userId, pendingDevice.getCustomerAccountId(), null, pendingDevice.getId(),
                 "DEVICE_VERIFY_SUCCESS", AuditOutcome.SUCCESS, "user_device", pendingDevice.getId().toString(),
                 "{\"installationId\":\"" + pendingDevice.getInstallationId() + "\"}", clientIp);
@@ -195,12 +223,16 @@ public class DeviceServiceImpl implements DeviceService {
 
         sessionRepository.terminateAllActiveByDeviceId(deviceId, SessionStatus.TERMINATED, now, "DEVICE_REVOKED", revokedByUserId);
 
+        // Cascade-revoke any active offline leases associated with this device
+        jdbcTemplate.update("UPDATE offline_lease SET revoked_at = ?, revoked_by_user_id = ? WHERE device_id = ? AND revoked_at IS NULL",
+                java.sql.Timestamp.from(now), revokedByUserId, deviceId);
+
         auditService.log(revokedByUserId, device.getCustomerAccountId(), null, device.getId(),
                 "DEVICE_REVOKE", AuditOutcome.SUCCESS, "user_device", device.getId().toString(), null, clientIp);
     }
 
     @Override
-    @Transactional
+    @Transactional(noRollbackFor = {ApiException.class})
     public UserDevice validateSignedRequest(UUID deviceId,
                                             String method,
                                             String path,

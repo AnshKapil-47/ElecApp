@@ -59,6 +59,22 @@ services:
     networks:
       - elecsarthi-net
 
+  nginx:
+    # NGINX Edge Reverse Proxy & Ingress Gateway
+    # Implements real-IP detection (X-Forwarded-For recursive parsing), security headers, and
+    # leaky-bucket rate limiting (IP-based primary throttling; coarse best-effort device ID throttling).
+    image: nginx:alpine
+    container_name: elecsarthi-nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${GATEWAY_PORT:-80}:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - elecsarthi-net
+
 volumes:
   es_pgdata:
     driver: local

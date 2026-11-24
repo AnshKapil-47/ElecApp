@@ -12,4 +12,5 @@ public interface EntitlementService {
     List<EntitlementResponse> getEntitlementsByCustomer(Long callerUserId, Role callerRole, Long customerAccountId);
     List<EntitlementResponse> getMyEntitlements(Long customerAccountId);
     EntitlementResponse getEntitlementById(Long callerUserId, Role callerRole, Long entitlementId);
+    EntitlementResponse revokeEntitlement(Long callerUserId, Role callerRole, Long entitlementId, String reason);
 }

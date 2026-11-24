@@ -4,6 +4,7 @@ import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.VoterSearchRequest;
 import com.elecsarthi.dto.response.*;
 import com.elecsarthi.entity.*;
+import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.EntitlementStatus;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.exception.common.ApiException;
@@ -11,10 +12,14 @@ import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.*;
 import com.elecsarthi.security.authorization.VoterAccessAuthorizer;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
 import com.elecsarthi.security.device.CryptoUtils;
+import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.VoterService;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -42,9 +47,31 @@ public class VoterServiceImpl implements VoterService {
     private final BoothAssignmentRepository boothAssignmentRepository;
     private final VoterRepository voterRepository;
     private final VoterAccessAuthorizer voterAccessAuthorizer;
+    private final VoterScopeAuthorizer voterScopeAuthorizer;
+    private final AuditService auditService;
     private final AppProperties appProperties;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @PostConstruct
+    public void initGlobalSettings() {
+        try {
+            List<String> details = jdbcTemplate.query(
+                    "SELECT details FROM audit_log WHERE action_type = 'GLOBAL_MOBILE_TOGGLE' ORDER BY created_at DESC LIMIT 1",
+                    (rs, rowNum) -> rs.getString("details")
+            );
+            if (!details.isEmpty()) {
+                JsonNode node = objectMapper.readTree(details.get(0));
+                if (node.has("enabled")) {
+                    boolean enabled = node.get("enabled").asBoolean();
+                    appProperties.setMobileNumbersEnabled(enabled);
+                    log.info("Restored global mobileNumbersEnabled setting from audit_log: {}", enabled);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Could not restore global mobile toggle from audit_log: {}", e.getMessage());
+        }
+    }
 
     @Override
     @Transactional(readOnly = true)
@@ -57,33 +84,19 @@ public class VoterServiceImpl implements VoterService {
         ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        Set<Integer> allowedBooths = validateSubuserAndGetAllowedBooths(callerUserId, callerRole, ent.getId());
-        String boothColumn = electionType.getBoothColumn();
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
+        String boothColumn = scope.boothColumn();
 
         int limit = Math.min(Math.max(1, request.getLimit()), 100);
         int page = Math.max(0, request.getPage());
         int offset = page * limit;
 
-        StringBuilder whereClause = new StringBuilder(" WHERE v.dataset_id = ? ");
-        List<Object> params = new ArrayList<>();
-        params.add(ent.getDatasetId());
+        StringBuilder whereClause = new StringBuilder(" WHERE ").append(scope.whereClause());
+        List<Object> params = new ArrayList<>(scope.params());
 
-        // 1. Entitlement scope criteria
-        applyEntitlementCriteria(whereClause, params, ent.getCriteria());
-
-        // 2. Subuser booth restrictions
-        if (allowedBooths != null) {
-            if (allowedBooths.isEmpty()) {
-                return new PageImpl<>(Collections.emptyList(), PageRequest.of(page, limit), 0);
-            }
-            whereClause.append(" AND v.").append(boothColumn).append(" IN (")
-                    .append(allowedBooths.stream().map(String::valueOf).collect(Collectors.joining(",")))
-                    .append(") ");
-        }
-
-        // 3. User request filters
+        // User request filters
         if (request.getBooth() != null) {
-            if (allowedBooths != null && !allowedBooths.contains(request.getBooth())) {
+            if (scope.allowedBooths() != null && !scope.allowedBooths().contains(request.getBooth())) {
                 return new PageImpl<>(Collections.emptyList(), PageRequest.of(page, limit), 0);
             }
             whereClause.append(" AND v.").append(boothColumn).append(" = ? ");
@@ -169,13 +182,15 @@ public class VoterServiceImpl implements VoterService {
             Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
             Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
 
+            Integer boothValue = rs.getObject(boothColumn, Integer.class);
+
             return VoterSummaryResponse.builder()
                     .id(rs.getLong("id"))
                     .datasetId(rs.getLong("dataset_id"))
                     .voterId(rs.getString("voter_id"))
                     .serialNo(rs.getObject("serial_no", Integer.class))
                     .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(rs.getObject("booth_no", Integer.class))
+                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
                     .firstNameEn(rs.getString("v_fname_en"))
                     .lastNameEn(rs.getString("v_lname_en"))
                     .firstNameMt(rs.getString("v_fname_mt"))
@@ -202,25 +217,27 @@ public class VoterServiceImpl implements VoterService {
         ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        Set<Integer> allowedBooths = validateSubuserAndGetAllowedBooths(callerUserId, callerRole, ent.getId());
-        String boothColumn = electionType.getBoothColumn();
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
+        String boothColumn = scope.boothColumn();
 
         String sql = "SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted " +
                 "FROM voter v " +
                 "LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id " +
-                "WHERE v.dataset_id = ? AND v.id = ?";
+                "WHERE v.id = ? AND " + scope.whereClause();
+
+        List<Object> selectParams = new ArrayList<>();
+        selectParams.add(customerAccountId);
+        selectParams.add(voterId);
+        selectParams.addAll(scope.params());
 
         List<VoterDetailResponse> results = jdbcTemplate.query(sql, (rs, rowNum) -> {
-            Integer boothVal = rs.getObject(boothColumn, Integer.class);
-            if (allowedBooths != null && (boothVal == null || !allowedBooths.contains(boothVal))) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Access to voter in this booth is not permitted for your assigned booth slots", HttpStatus.FORBIDDEN);
-            }
-
             byte[] encMobile = rs.getBytes("mobile_no_enc");
             String mobileStr = processMobileNumber(encMobile, callerRole, ent.isMobileAccess());
 
             Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
             Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
+
+            Integer boothValue = rs.getObject(boothColumn, Integer.class);
 
             return VoterDetailResponse.builder()
                     .id(rs.getLong("id"))
@@ -234,7 +251,7 @@ public class VoterServiceImpl implements VoterService {
                     .acNo(rs.getObject("ac_no", Integer.class))
                     .acNameEn(rs.getString("ac_name_en"))
                     .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(rs.getObject("booth_no", Integer.class))
+                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
                     .boothNameEn(rs.getString("booth_name_en"))
                     .boothAddressEn(rs.getString("booth_address_en"))
                     .firstNameEn(rs.getString("v_fname_en"))
@@ -252,7 +269,7 @@ public class VoterServiceImpl implements VoterService {
                     .voted(rs.getBoolean("is_voted"))
                     .votedAt(votedAt)
                     .build();
-        }, customerAccountId, ent.getDatasetId(), voterId);
+        }, selectParams.toArray());
 
         if (results.isEmpty()) {
             throw new ResourceNotFoundException("Voter not found with ID: " + voterId);
@@ -268,35 +285,43 @@ public class VoterServiceImpl implements VoterService {
         ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        Set<Integer> allowedBooths = validateSubuserAndGetAllowedBooths(callerUserId, callerRole, ent.getId());
-        String boothColumn = electionType.getBoothColumn();
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
+        String boothColumn = scope.boothColumn();
 
-        // 1. Fetch target voter
+        // 1. Fetch target voter strictly within caller's geographical entitlement scope
         String voterSql = "SELECT v." + boothColumn + " AS target_booth, v.house_no " +
-                "FROM voter v WHERE v.dataset_id = ? AND v.id = ?";
-        List<Map<String, Object>> targetRows = jdbcTemplate.queryForList(voterSql, ent.getDatasetId(), voterId);
+                "FROM voter v WHERE v.id = ? AND " + scope.whereClause();
+
+        List<Object> targetParams = new ArrayList<>();
+        targetParams.add(voterId);
+        targetParams.addAll(scope.params());
+
+        List<Map<String, Object>> targetRows = jdbcTemplate.queryForList(voterSql, targetParams.toArray());
         if (targetRows.isEmpty()) {
-            throw new ResourceNotFoundException("Target voter not found");
+            throw new ResourceNotFoundException("Target voter not found with ID: " + voterId);
         }
 
         Map<String, Object> target = targetRows.get(0);
         Integer boothVal = (Integer) target.get("target_booth");
         String houseNo = (String) target.get("house_no");
 
-        if (allowedBooths != null && (boothVal == null || !allowedBooths.contains(boothVal))) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access to voter in this booth is not permitted", HttpStatus.FORBIDDEN);
-        }
-
         if (houseNo == null || houseNo.trim().isBlank()) {
             // Cannot match family without a house number; return empty list
             return Collections.emptyList();
         }
 
+        // 2. Fetch family members matching booth, house_no, and entitlement scope
         String familySql = "SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted " +
                 "FROM voter v " +
                 "LEFT JOIN voter_turnout vt ON vt.dataset_id = v.dataset_id AND vt.customer_account_id = ? AND vt.voter_row_id = v.id " +
-                "WHERE v.dataset_id = ? AND v." + boothColumn + " = ? AND v.house_no = ? " +
-                "ORDER BY v.serial_no ASC";
+                "WHERE v.house_no = ? AND v." + boothColumn + " = ? AND " + scope.whereClause() +
+                " ORDER BY v.serial_no ASC";
+
+        List<Object> familyParams = new ArrayList<>();
+        familyParams.add(customerAccountId);
+        familyParams.add(houseNo.trim());
+        familyParams.add(boothVal);
+        familyParams.addAll(scope.params());
 
         return jdbcTemplate.query(familySql, (rs, rowNum) -> {
             byte[] encMobile = rs.getBytes("mobile_no_enc");
@@ -305,13 +330,15 @@ public class VoterServiceImpl implements VoterService {
             Timestamp turnoutTs = rs.getTimestamp("turnout_marked_at");
             Instant votedAt = (turnoutTs != null) ? turnoutTs.toInstant() : null;
 
+            Integer boothValue = rs.getObject(boothColumn, Integer.class);
+
             return VoterSummaryResponse.builder()
                     .id(rs.getLong("id"))
                     .datasetId(rs.getLong("dataset_id"))
                     .voterId(rs.getString("voter_id"))
                     .serialNo(rs.getObject("serial_no", Integer.class))
                     .partNo(rs.getObject("part_no", Integer.class))
-                    .boothNo(rs.getObject("booth_no", Integer.class))
+                    .boothNo(boothValue != null ? boothValue : rs.getObject("booth_no", Integer.class))
                     .firstNameEn(rs.getString("v_fname_en"))
                     .lastNameEn(rs.getString("v_lname_en"))
                     .firstNameMt(rs.getString("v_fname_mt"))
@@ -326,7 +353,7 @@ public class VoterServiceImpl implements VoterService {
                     .voted(rs.getBoolean("is_voted"))
                     .votedAt(votedAt)
                     .build();
-        }, customerAccountId, ent.getDatasetId(), boothVal, houseNo);
+        }, familyParams.toArray());
     }
 
     @Override
@@ -336,20 +363,21 @@ public class VoterServiceImpl implements VoterService {
         ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
 
-        Set<Integer> allowedBooths = validateSubuserAndGetAllowedBooths(callerUserId, callerRole, ent.getId());
-        String boothColumn = electionType.getBoothColumn();
+        VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
+        String boothColumn = scope.boothColumn();
 
-        String sql = "SELECT * FROM voter WHERE dataset_id = ? AND id = ?";
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, ent.getDatasetId(), voterId);
+        String sql = "SELECT * FROM voter v WHERE v.id = ? AND " + scope.whereClause();
+        List<Object> params = new ArrayList<>();
+        params.add(voterId);
+        params.addAll(scope.params());
+
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, params.toArray());
         if (rows.isEmpty()) {
-            throw new ResourceNotFoundException("Voter not found");
+            throw new ResourceNotFoundException("Voter not found with ID: " + voterId);
         }
 
         Map<String, Object> voterRow = rows.get(0);
-        Integer boothVal = (Integer) voterRow.get(boothColumn);
-        if (allowedBooths != null && (boothVal == null || !allowedBooths.contains(boothVal))) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access to voter slip in this booth is not permitted", HttpStatus.FORBIDDEN);
-        }
+        Integer boothValue = (Integer) voterRow.get(boothColumn);
 
         List<ElectionTypeField> onSlipFields = fieldRepository.findByElectionTypeIdAndOnSlipTrueOrderByDisplayOrderAsc(electionType.getId());
 
@@ -382,7 +410,7 @@ public class VoterServiceImpl implements VoterService {
                 .voterId((String) voterRow.get("voter_id"))
                 .serialNo((Integer) voterRow.get("serial_no"))
                 .partNo((Integer) voterRow.get("part_no"))
-                .boothNo((Integer) voterRow.get("booth_no"))
+                .boothNo(boothValue != null ? boothValue : (Integer) voterRow.get("booth_no"))
                 .fullNameEn(fullNameEn)
                 .fullNameMt(fullNameMt)
                 .relationNameEn(relNameEn)
@@ -396,12 +424,25 @@ public class VoterServiceImpl implements VoterService {
     }
 
     @Override
+    @Transactional
     public void updateGlobalMobileNumbersEnabled(Long ownerUserId, Role callerRole, boolean enabled) {
         if (callerRole != Role.OWNER) {
             throw new ApiException(ErrorCode.FORBIDDEN, "Only OWNER can toggle global mobile numbers setting", HttpStatus.FORBIDDEN);
         }
+
+        // 1. Update memory configuration
         appProperties.setMobileNumbersEnabled(enabled);
-        log.info("Global mobileNumbersEnabled updated to {} by owner {}", enabled, ownerUserId);
+
+        // 2. Audit the toggle to audit_log (Finding 13: persistent, audited)
+        auditService.log(ownerUserId, null, null, null,
+                "GLOBAL_MOBILE_TOGGLE", AuditOutcome.SUCCESS,
+                "system_setting", "mobile_numbers_enabled",
+                "{\"enabled\":" + enabled + "}", null);
+
+        // 3. Increment mobile_access_policy_version on all active customer accounts so mobile clients re-evaluate policy
+        jdbcTemplate.update("UPDATE customer_account SET mobile_access_policy_version = mobile_access_policy_version + 1 WHERE status = 'ACTIVE'");
+
+        log.info("Global mobileNumbersEnabled updated to {} by owner {}, policy version bumped", enabled, ownerUserId);
     }
 
     @Override
@@ -431,35 +472,6 @@ public class VoterServiceImpl implements VoterService {
         return ent;
     }
 
-    private Set<Integer> validateSubuserAndGetAllowedBooths(Long subuserId, Role role, Long entitlementId) {
-        if (role != Role.SUBUSER) {
-            return null; // Customer has full access to all booths in entitlement
-        }
-
-        Instant now = Instant.now();
-        List<BoothAssignment> assignments = boothAssignmentRepository.findActiveAssignmentsForSubuserAndEntitlement(subuserId, entitlementId, now);
-        if (assignments.isEmpty()) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subuser has no active booth assignment for this entitlement", HttpStatus.FORBIDDEN);
-        }
-
-        return assignments.stream()
-                .map(BoothAssignment::getBoothValue)
-                .collect(Collectors.toSet());
-    }
-
-    private void applyEntitlementCriteria(StringBuilder whereClause, List<Object> params, String criteriaJson) {
-        try {
-            Map<String, Object> criteria = objectMapper.readValue(criteriaJson, new TypeReference<Map<String, Object>>() {});
-            for (Map.Entry<String, Object> entry : criteria.entrySet()) {
-                String col = entry.getKey().trim().toLowerCase();
-                whereClause.append(" AND v.").append(col).append(" = ? ");
-                params.add(entry.getValue());
-            }
-        } catch (Exception e) {
-            log.error("Failed to parse entitlement criteria JSON: {}", criteriaJson, e);
-        }
-    }
-
     private String processMobileNumber(byte[] mobileNoEnc, Role callerRole, boolean entitlementMobileAccess) {
         if (mobileNoEnc == null || mobileNoEnc.length == 0) {
             return null;
@@ -482,15 +494,9 @@ public class VoterServiceImpl implements VoterService {
                 }
             }
         } catch (Exception e) {
-            // Mock bytes fallback
-            String raw = new String(mobileNoEnc, StandardCharsets.UTF_8);
-            if (canViewUnmasked) {
-                return raw;
-            }
-            if (raw.length() >= 4) {
-                return "+91*****" + raw.substring(raw.length() - 4);
-            }
-            return "+91*****XXXX";
+            // Finding 14: Never serve raw bytes if decryption fails; log warning and return null
+            log.warn("Voter mobile number decryption failed: {}", e.getMessage());
+            return null;
         }
     }
 }

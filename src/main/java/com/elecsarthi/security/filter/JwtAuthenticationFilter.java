@@ -39,19 +39,22 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final CustomerAccountRepository customerAccountRepository;
     private final UserDeviceRepository deviceRepository;
     private final Clock clock;
+    private final com.elecsarthi.config.AppProperties appProperties;
 
     public JwtAuthenticationFilter(JwtTokenProvider tokenProvider,
                                    UserSessionRepository sessionRepository,
                                    AppUserRepository userRepository,
                                    CustomerAccountRepository customerAccountRepository,
                                    UserDeviceRepository deviceRepository,
-                                   Clock clock) {
+                                   Clock clock,
+                                   com.elecsarthi.config.AppProperties appProperties) {
         this.tokenProvider = tokenProvider;
         this.sessionRepository = sessionRepository;
         this.userRepository = userRepository;
         this.customerAccountRepository = customerAccountRepository;
         this.deviceRepository = deviceRepository;
         this.clock = clock;
+        this.appProperties = appProperties;
     }
 
     @Override
@@ -64,6 +67,48 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             String token = authHeader.substring(7).trim();
             try {
                 Claims claims = tokenProvider.parseClaims(token);
+                String typ = claims.get("typ", String.class);
+
+                // Handle single-use registration token (scoped strictly to /devices/register and /devices/verify)
+                if ("REGISTRATION".equals(typ)) {
+                    String jti = claims.get("jti", String.class);
+                    if (tokenProvider.isRegistrationJtiInvalid(jti)) {
+                        response.sendError(HttpServletResponse.SC_FORBIDDEN, "Registration token has already been used or invalidated");
+                        return;
+                    }
+
+                    String uri = request.getRequestURI();
+                    if (!uri.endsWith("/api/v1/devices/register") && !uri.endsWith("/api/v1/devices/verify")) {
+                        response.sendError(HttpServletResponse.SC_FORBIDDEN, "Registration token cannot be used for application APIs");
+                        return;
+                    }
+
+                    Long uid = claims.get("uid", Long.class);
+                    Role role = Role.valueOf(claims.get("role", String.class));
+                    Long cid = claims.get("cid", Long.class);
+
+                    Optional<AppUser> userOpt = userRepository.findById(uid);
+                    if (userOpt.isPresent() && userOpt.get().getStatus() == UserStatus.ACTIVE) {
+                        ElecSarthiUserPrincipal principal = new ElecSarthiUserPrincipal(
+                                null,
+                                uid,
+                                claims.getSubject(),
+                                role,
+                                cid,
+                                null
+                        );
+                        request.setAttribute("registration_jti", jti);
+                        UsernamePasswordAuthenticationToken authentication =
+                                new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
+                        SecurityContextHolder.getContext().setAuthentication(authentication);
+                        filterChain.doFilter(request, response);
+                        return;
+                    } else {
+                        response.sendError(HttpServletResponse.SC_FORBIDDEN, "User account is inactive or not found");
+                        return;
+                    }
+                }
+
                 String sidStr = claims.get("sid", String.class);
                 if (sidStr != null) {
                     UUID sessionId = UUID.fromString(sidStr);
@@ -94,8 +139,18 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                                 }
 
                                 if (customerOk && deviceOk) {
-                                    session.setLastSeenAt(now);
-                                    sessionRepository.save(session);
+                                    // Throttled lastSeenAt and sliding idle expiry for WEB sessions (Findings 7 & 20)
+                                    if (session.getLastSeenAt() == null || now.isAfter(session.getLastSeenAt().plusSeconds(60))) {
+                                        session.setLastSeenAt(now);
+                                        if (session.getClientType() == com.elecsarthi.enums.ClientType.WEB && session.getIdleExpiresAt() != null) {
+                                            Instant newIdle = now.plus(appProperties.getJwt().getWebIdleExpirationMinutes(), java.time.temporal.ChronoUnit.MINUTES);
+                                            if (newIdle.isAfter(session.getAbsoluteExpiresAt())) {
+                                                newIdle = session.getAbsoluteExpiresAt();
+                                            }
+                                            session.setIdleExpiresAt(newIdle);
+                                        }
+                                        sessionRepository.save(session);
+                                    }
 
                                     ElecSarthiUserPrincipal principal = new ElecSarthiUserPrincipal(
                                             session.getId(),
