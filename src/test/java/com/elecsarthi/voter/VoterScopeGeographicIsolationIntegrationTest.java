@@ -2,11 +2,8 @@ package com.elecsarthi.voter;
 
 import com.elecsarthi.dto.request.MarkTurnoutRequest;
 import com.elecsarthi.dto.request.ResetTurnoutRequest;
-import com.elecsarthi.dto.request.VoterSearchRequest;
 import com.elecsarthi.dto.response.TurnoutStatisticsResponse;
 import com.elecsarthi.dto.response.VoterDetailResponse;
-import com.elecsarthi.dto.response.VoterSlipResponse;
-import com.elecsarthi.dto.response.VoterSummaryResponse;
 import com.elecsarthi.entity.*;
 import com.elecsarthi.enums.*;
 import com.elecsarthi.exception.common.ApiException;
@@ -19,13 +16,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.data.domain.Page;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 

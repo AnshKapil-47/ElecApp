@@ -6,13 +6,12 @@ import com.elecsarthi.dto.response.ElectionTypeResponse;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.ElectionTypeField;
 import com.elecsarthi.enums.ElectionTypeCode;
-import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
+import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.repository.ElectionTypeFieldRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.service.ElectionTypeService;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -71,7 +70,7 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
 
         // Verify targetField is a valid column for this election type
         ElectionTypeField targetDef = fieldRepository.findByElectionTypeIdAndSourceColumn(electionType.getId(), targetField.trim().toLowerCase())
-                .orElseThrow(() -> new ApiException(ErrorCode.BAD_REQUEST, "Invalid target field: " + targetField, HttpStatus.BAD_REQUEST));
+                .orElseThrow(() -> new BadRequestException("Invalid target field: " + targetField));
 
         String safeTargetColumn = targetDef.getSourceColumn();
 
@@ -90,7 +89,7 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
 
                 // Validate parentCol against election_type_field
                 ElectionTypeField parentDef = fieldRepository.findByElectionTypeIdAndSourceColumn(electionType.getId(), parentCol)
-                        .orElseThrow(() -> new ApiException(ErrorCode.BAD_REQUEST, "Invalid parent field: " + parentCol, HttpStatus.BAD_REQUEST));
+                        .orElseThrow(() -> new BadRequestException("Invalid parent field: " + parentCol));
 
                 sql.append(" AND ").append(parentDef.getSourceColumn()).append(" = ?");
 
@@ -98,7 +97,7 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
                     try {
                         params.add(Integer.parseInt(parentVal.trim()));
                     } catch (NumberFormatException e) {
-                        throw new ApiException(ErrorCode.BAD_REQUEST, "Parent field " + parentCol + " must be an integer", HttpStatus.BAD_REQUEST);
+                        throw new BadRequestException("Parent field " + parentCol + " must be an integer");
                     }
                 } else {
                     params.add(parentVal.trim());
@@ -118,21 +117,21 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
 
     private ElectionType resolveElectionType(String codeOrId) {
         if (codeOrId == null || codeOrId.isBlank()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Election type identifier is required.", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Election type identifier is required.");
         }
 
         try {
             short id = Short.parseShort(codeOrId);
             return electionTypeRepository.findById(id)
-                    .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Election type not found with ID: " + id, HttpStatus.NOT_FOUND));
+                    .orElseThrow(() -> new ResourceNotFoundException("Election type not found with ID: " + id));
         } catch (NumberFormatException ignored) {
             // Treat as code
             try {
                 ElectionTypeCode code = ElectionTypeCode.valueOf(codeOrId.trim().toUpperCase());
                 return electionTypeRepository.findByCode(code)
-                        .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Election type not found with code: " + code, HttpStatus.NOT_FOUND));
+                        .orElseThrow(() -> new ResourceNotFoundException("Election type not found with code: " + code));
             } catch (IllegalArgumentException e) {
-                throw new ApiException(ErrorCode.BAD_REQUEST, "Unknown election type: " + codeOrId, HttpStatus.BAD_REQUEST);
+                throw new BadRequestException("Unknown election type: " + codeOrId);
             }
         }
     }

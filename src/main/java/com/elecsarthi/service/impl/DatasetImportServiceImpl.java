@@ -12,9 +12,11 @@ import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.DatasetStatus;
 import com.elecsarthi.enums.DatasetTier;
 import com.elecsarthi.enums.FieldUsage;
-import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
+import com.elecsarthi.exception.common.ResourceNotFoundException;
+import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.DatasetRepository;
 import com.elecsarthi.repository.ElectionTypeFieldRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
@@ -96,23 +98,22 @@ public class DatasetImportServiceImpl implements DatasetImportService {
     @Override
     public DatasetDetailResponse importDataset(MultipartFile file, DatasetUploadRequest request, Long callerUserId) {
         if (file == null || file.isEmpty()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "File is required.", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("File is required.");
         }
 
         String originalFilename = file.getOriginalFilename();
         if (originalFilename == null || !originalFilename.toLowerCase().endsWith(".xlsx")) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Only .xlsx Excel files are supported.", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Only .xlsx Excel files are supported.");
         }
 
         ElectionType electionType = electionTypeRepository.findByCode(request.getElectionTypeCode())
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Election type not found: " + request.getElectionTypeCode(), HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("Election type not found: " + request.getElectionTypeCode()));
 
-        // Finding 8: Validate superseded dataset existence and status BEFORE streaming
+        // Validate superseded dataset existence and status BEFORE streaming
         Dataset oldSuperseded = null;
         if (request.getSupersedesDatasetId() != null) {
             oldSuperseded = datasetRepository.findById(request.getSupersedesDatasetId())
-                    .orElseThrow(() -> new ApiException(ErrorCode.BAD_REQUEST,
-                            "Superseded dataset not found: " + request.getSupersedesDatasetId(), HttpStatus.BAD_REQUEST));
+                    .orElseThrow(() -> new BadRequestException("Superseded dataset not found: " + request.getSupersedesDatasetId()));
             if (oldSuperseded.getStatus() != DatasetStatus.IMPORTED) {
                 throw new ConflictException(ErrorCode.CONFLICT,
                         "Cannot supersede dataset in status: " + oldSuperseded.getStatus());
@@ -138,7 +139,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
         Long datasetId = null;
 
         try {
-            // Finding 9: Check duplicate file hash across non-failed datasets; auto-clean stale PENDING (> 1 hr)
+            // Check duplicate file hash across non-failed datasets; auto-clean stale PENDING (> 1 hr)
             Optional<Dataset> existingDataset = datasetRepository.findByFileSha256AndStatusNot(fileSha256, DatasetStatus.FAILED);
             if (existingDataset.isPresent()) {
                 Dataset ex = existingDataset.get();
@@ -155,7 +156,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             }
 
             Instant now = clock.instant();
-            // Finding 17: MASTER kept 60 days; LONG_TERM initial grace period is 30 days until entitlements sold
+            // MASTER kept 60 days; LONG_TERM initial grace period is 30 days until entitlements sold
             Instant deleteAfter = (request.getStorageTier() == DatasetTier.MASTER)
                     ? now.plus(60, ChronoUnit.DAYS)
                     : now.plus(30, ChronoUnit.DAYS);
@@ -178,7 +179,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             // Create partitions
             jdbcTemplate.execute("SELECT create_dataset_partitions(" + datasetId + ");");
 
-            // Finding N6: Cross-lens text normalization.
+            // Cross-lens text normalization.
             // A dataset can be queried under multiple election types (lenses).
             // Pre-normalize the union of all text filter and guard columns across all election types.
             Set<String> textFilterColumns = new HashSet<>();
@@ -204,7 +205,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             VoterImportContext context = new VoterImportContext(datasetId, electionType, textFilterColumns);
             streamXlsx(tempFile, context);
 
-            // Finding 8: Overlap probe on source_record_key_hash (exclude self and superseded dataset)
+            // Overlap probe on source_record_key_hash (exclude self and superseded dataset)
             String overlapSql;
             List<Object> overlapParams = new ArrayList<>();
             overlapParams.add(request.getStorageTier().name());
@@ -261,7 +262,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
 
         } catch (Exception e) {
             log.error("Dataset import failed for datasetId={}", datasetId, e);
-            // Finding 9: Clean up failed dataset partition immediately so file is not locked permanently
+            // Clean up failed dataset partition immediately so file is not locked permanently
             if (dataset != null && dataset.getId() != null) {
                 try {
                     dataset.setStatus(DatasetStatus.FAILED);
@@ -292,7 +293,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             XSSFSheetXMLHandler handler = new XSSFSheetXMLHandler(styles, sst, sheetHandler, false);
             parser.setContentHandler(handler);
 
-            // Finding 21: Iterate over all sheets in the workbook (multi-sheet support)
+            // Iterate over all sheets in the workbook (multi-sheet support)
             Iterator<InputStream> sheets = reader.getSheetsData();
             int sheetIndex = 0;
             while (sheets.hasNext()) {
@@ -432,7 +433,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
 
             ctx.totalRows++;
 
-            // Finding 4: Normalize text filter and guard columns with CriteriaNormalizer.normalizeText
+            // Normalize text filter and guard columns with CriteriaNormalizer.normalizeText
             for (String col : ctx.textFilterColumns) {
                 String val = currentRow.get(col);
                 if (val != null) {

@@ -2,16 +2,12 @@ package com.elecsarthi.service;
 
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.ElectionTypeField;
-import com.elecsarthi.enums.ElectionTypeCode;
-import com.elecsarthi.exception.errorcode.ErrorCode;
-import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.repository.ElectionTypeFieldRepository;
 import com.elecsarthi.security.device.CryptoUtils;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
 import java.text.Normalizer;
@@ -44,7 +40,7 @@ public class CriteriaNormalizer {
 
     public NormalizedCriteria normalize(ElectionType electionType, Map<String, Object> input) {
         if (input == null || input.isEmpty()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Criteria cannot be empty.", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Criteria cannot be empty.");
         }
 
         List<ElectionTypeField> filterFields = fieldRepository.findByElectionTypeIdAndUsageOrderByFilterOrderAsc(
@@ -74,7 +70,7 @@ public class CriteriaNormalizer {
             ElectionTypeField fieldDef = fieldMap.get(colName);
             if (fieldDef == null) {
                 // Reject invalid column not applicable to this election type's filter criteria
-                throw new ApiException(ErrorCode.BAD_REQUEST, "Field '" + colName + "' is not a valid filter field for election type " + electionType.getCode(), HttpStatus.BAD_REQUEST);
+                throw new BadRequestException("Field '" + colName + "' is not a valid filter field for election type " + electionType.getCode());
             }
 
             if (fieldDef.getValueType() == com.elecsarthi.enums.FieldValueType.INT) {
@@ -86,18 +82,18 @@ public class CriteriaNormalizer {
                     try {
                         numVal = Long.parseLong(str);
                     } catch (NumberFormatException e) {
-                        throw new ApiException(ErrorCode.BAD_REQUEST, "Field '" + colName + "' must be an integer.", HttpStatus.BAD_REQUEST);
+                        throw new BadRequestException("Field '" + colName + "' must be an integer.");
                     }
                 }
                 if (numVal <= 0) {
-                    throw new ApiException(ErrorCode.BAD_REQUEST, "Field '" + colName + "' must be a positive integer.", HttpStatus.BAD_REQUEST);
+                    throw new BadRequestException("Field '" + colName + "' must be a positive integer.");
                 }
                 normalizedMap.put(colName, numVal);
             } else {
                 String strVal = rawValue.toString();
                 String normalizedStr = normalizeText(strVal);
                 if (normalizedStr.isEmpty()) {
-                    throw new ApiException(ErrorCode.BAD_REQUEST, "Field '" + colName + "' cannot be blank.", HttpStatus.BAD_REQUEST);
+                    throw new BadRequestException("Field '" + colName + "' cannot be blank.");
                 }
                 normalizedMap.put(colName, normalizedStr);
             }
@@ -106,7 +102,7 @@ public class CriteriaNormalizer {
         // Verify all required filter fields are present
         for (String reqCol : requiredFilterColumns) {
             if (!normalizedMap.containsKey(reqCol)) {
-                throw new ApiException(ErrorCode.BAD_REQUEST, "Missing required filter field: " + reqCol, HttpStatus.BAD_REQUEST);
+                throw new BadRequestException("Missing required filter field: " + reqCol);
             }
         }
 

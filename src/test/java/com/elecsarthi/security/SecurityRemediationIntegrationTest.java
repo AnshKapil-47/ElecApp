@@ -2,7 +2,6 @@ package com.elecsarthi.security;
 
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.dto.request.CustomerActivateRequest;
-import com.elecsarthi.dto.request.DirectEntitlementRequest;
 import com.elecsarthi.dto.request.LoginRequest;
 import com.elecsarthi.dto.request.OfflineWritebackRequest;
 import com.elecsarthi.entity.*;

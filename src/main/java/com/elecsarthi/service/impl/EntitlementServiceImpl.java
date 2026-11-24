@@ -5,6 +5,8 @@ import com.elecsarthi.dto.response.EntitlementResponse;
 import com.elecsarthi.entity.*;
 import com.elecsarthi.enums.*;
 import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.*;
@@ -46,25 +48,23 @@ public class EntitlementServiceImpl implements EntitlementService {
     @Transactional
     public EntitlementResponse createDirectEntitlement(Long callerUserId, Role callerRole, DirectEntitlementRequest request) {
         if (callerRole != Role.OWNER && callerRole != Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only OWNER or SUBOWNER can create direct entitlements", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only OWNER or SUBOWNER can create direct entitlements");
         }
 
         if (request.isMobileAccess() && callerRole != Role.OWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only OWNER can enable mobile number access", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only OWNER can enable mobile number access");
         }
 
-        CustomerAccount customer = customerAccountRepository.findById(request.getCustomerAccountId())
-                .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+        CustomerAccount customer = customerAccountRepository.requireById(request.getCustomerAccountId());
 
         if (customer.getStatus() != UserStatus.ACTIVE) {
             throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "Customer account is suspended or not active", HttpStatus.BAD_REQUEST);
         }
 
-        ElectionType electionType = electionTypeRepository.findById(request.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(request.getElectionTypeId());
 
         if (!electionType.isActive()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Election type is not active", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Election type is not active");
         }
 
         CriteriaNormalizer.NormalizedCriteria normalized = criteriaNormalizer.normalize(electionType, request.getCriteria());
@@ -91,9 +91,7 @@ public class EntitlementServiceImpl implements EntitlementService {
 
         if (request.getStorageTier() == DatasetTier.MASTER) {
             if (dataset.getDeleteAfter() != null && validUntil.isAfter(dataset.getDeleteAfter())) {
-                throw new ApiException(ErrorCode.BAD_REQUEST,
-                        "Validity until " + validUntil + " exceeds MASTER dataset expiration " + dataset.getDeleteAfter(),
-                        HttpStatus.BAD_REQUEST);
+                throw new BadRequestException("Validity until " + validUntil + " exceeds MASTER dataset expiration " + dataset.getDeleteAfter());
             }
         }
 
@@ -135,8 +133,7 @@ public class EntitlementServiceImpl implements EntitlementService {
     @Override
     @Transactional
     public EntitlementResponse updateMobileAccess(Long ownerUserId, Long entitlementId, boolean enabled) {
-        Entitlement entitlement = entitlementRepository.findById(entitlementId)
-                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+        Entitlement entitlement = entitlementRepository.requireById(entitlementId);
 
         entitlement.setMobileAccess(enabled);
         entitlement.setMobileAccessChangedAt(Instant.now());
@@ -161,16 +158,15 @@ public class EntitlementServiceImpl implements EntitlementService {
     @Override
     @Transactional(readOnly = true)
     public List<EntitlementResponse> getEntitlementsByCustomer(Long callerUserId, Role callerRole, Long customerAccountId) {
-        CustomerAccount customer = customerAccountRepository.findById(customerAccountId)
-                .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+        CustomerAccount customer = customerAccountRepository.requireById(customerAccountId);
 
         if (callerRole == Role.SUBUSER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subusers cannot view customer entitlements", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Subusers cannot view customer entitlements");
         }
 
         if (callerRole == Role.AGENT) {
             if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "You are not the owning agent for this customer", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("You are not the owning agent for this customer");
             }
         }
 
@@ -196,18 +192,16 @@ public class EntitlementServiceImpl implements EntitlementService {
     @Override
     @Transactional(readOnly = true)
     public EntitlementResponse getEntitlementById(Long callerUserId, Role callerRole, Long entitlementId) {
-        Entitlement entitlement = entitlementRepository.findById(entitlementId)
-                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+        Entitlement entitlement = entitlementRepository.requireById(entitlementId);
 
         if (callerRole == Role.SUBUSER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subusers cannot view entitlements", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Subusers cannot view entitlements");
         }
 
         if (callerRole == Role.AGENT) {
-            CustomerAccount customer = customerAccountRepository.findById(entitlement.getCustomerAccountId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+            CustomerAccount customer = customerAccountRepository.requireById(entitlement.getCustomerAccountId());
             if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Access denied", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Access denied");
             }
         }
 
@@ -219,14 +213,13 @@ public class EntitlementServiceImpl implements EntitlementService {
     @Transactional
     public EntitlementResponse revokeEntitlement(Long callerUserId, Role callerRole, Long entitlementId, String reason) {
         if (callerRole != Role.OWNER && callerRole != Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only OWNER or SUBOWNER can revoke entitlements", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only OWNER or SUBOWNER can revoke entitlements");
         }
 
-        Entitlement entitlement = entitlementRepository.findById(entitlementId)
-                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+        Entitlement entitlement = entitlementRepository.requireById(entitlementId);
 
         if (entitlement.getStatus() == EntitlementStatus.REVOKED) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Entitlement is already revoked", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Entitlement is already revoked");
         }
 
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
@@ -339,7 +332,7 @@ public class EntitlementServiceImpl implements EntitlementService {
             case DAY -> end = start.plusDays(durationValue);
             case WEEK -> end = start.plusWeeks(durationValue);
             case MONTH -> end = start.plusMonths(durationValue);
-            default -> throw new ApiException(ErrorCode.BAD_REQUEST, "Unsupported duration unit: " + durationUnit, HttpStatus.BAD_REQUEST);
+            default -> throw new BadRequestException("Unsupported duration unit: " + durationUnit);
         }
         return end.toInstant();
     }

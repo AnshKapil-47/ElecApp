@@ -15,7 +15,6 @@ import java.util.Optional;
 public interface BoothAssignmentRepository extends JpaRepository<BoothAssignment, Long> {
     List<BoothAssignment> findBySubuserIdAndStatus(Long subuserId, BoothAssignmentStatus status);
     List<BoothAssignment> findByCustomerAccountId(Long customerAccountId);
-    List<BoothAssignment> findByEntitlementId(Long entitlementId);
     Optional<BoothAssignment> findByIdAndSubuserId(Long id, Long subuserId);
 
     @Query("SELECT ba FROM BoothAssignment ba WHERE ba.subuserId = :subuserId " +

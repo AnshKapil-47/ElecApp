@@ -7,16 +7,13 @@ import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.SaleStatus;
-import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.exception.errorcode.ErrorCode;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.repository.AgentSaleLineRepository;
 import com.elecsarthi.repository.AgentSaleRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.service.ReportService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,7 +21,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ReportServiceImpl implements ReportService {
@@ -38,11 +34,11 @@ public class ReportServiceImpl implements ReportService {
     @Transactional(readOnly = true)
     public SalesReportResponse getSalesReport(Long callerUserId, Role callerRole, Long agentId, Instant from, Instant to) {
         if (callerRole == Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subowners are not permitted to view sales reports", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Subowners are not permitted to view sales reports");
         }
 
         if (callerRole != Role.OWNER && callerRole != Role.AGENT) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access denied to sales reports", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Access denied to sales reports");
         }
 
         Long targetAgentId = agentId;

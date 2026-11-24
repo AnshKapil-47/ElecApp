@@ -18,6 +18,8 @@ import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.SyncStatus;
 import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.AppUserRepository;
@@ -26,8 +28,8 @@ import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.repository.SyncSessionRepository;
 import com.elecsarthi.repository.UserDeviceRepository;
-import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.SyncService;
@@ -70,31 +72,29 @@ public class SyncServiceImpl implements SyncService {
     @Transactional
     public SyncSessionResponse startSyncSession(Long customerUserId, Role callerRole, Long customerAccountId, UUID deviceId, StartSyncSessionRequest request) {
         if (callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Bulk synchronization is strictly reserved for Customer primary login; Subusers and Agents are forbidden", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Bulk synchronization is strictly reserved for Customer primary login; Subusers and Agents are forbidden");
         }
 
         if (deviceId == null) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Device ID is required for sync session", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Device ID is required for sync session");
         }
 
-        Entitlement ent = entitlementRepository.findById(request.getEntitlementId())
-                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+        Entitlement ent = entitlementRepository.requireById(request.getEntitlementId());
 
         if (!customerAccountId.equals(ent.getCustomerAccountId()) || ent.getStatus() != EntitlementStatus.ACTIVE) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement is not active or belongs to another customer", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement is not active or belongs to another customer");
         }
 
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Entitlement is expired or not yet valid", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Entitlement is expired or not yet valid");
         }
 
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, customerUserId, callerRole, "v");
 
-        // Count total voters matching entitlement criteria (Finding 2, 3)
+        // Count total voters matching entitlement criteria
         String countSql = "SELECT COUNT(*) FROM voter v WHERE " + scope.whereClause();
         Long totalRecordsCount = jdbcTemplate.queryForObject(countSql, Long.class, scope.params().toArray());
         int totalRecords = (totalRecordsCount != null) ? totalRecordsCount.intValue() : 0;
@@ -150,41 +150,41 @@ public class SyncServiceImpl implements SyncService {
     @Transactional
     public SyncChunkResponse getChunk(Long customerUserId, Role callerRole, Long customerAccountId, UUID sessionId, int chunkNo) {
         if (callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access denied to bulk sync chunks", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Access denied to bulk sync chunks");
         }
 
         SyncSession session = syncSessionRepository.findById(sessionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Sync session not found"));
 
         if (!session.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Session does not belong to this customer account", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Session does not belong to this customer account");
         }
 
         // Recheck user matches session
         if (!session.getUserId().equals(customerUserId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Sync session was initiated by a different user", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Sync session was initiated by a different user");
         }
 
         // Revalidate User status is ACTIVE
         AppUser user = userRepository.findById(customerUserId)
-                .orElseThrow(() -> new ApiException(ErrorCode.FORBIDDEN, "User account not found", HttpStatus.FORBIDDEN));
+                .orElseThrow(() -> new ForbiddenException("User account not found"));
         if (user.getStatus() != UserStatus.ACTIVE) {
             throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "User account is suspended or inactive", HttpStatus.FORBIDDEN);
         }
 
         // Revalidate Customer Account status is ACTIVE
         CustomerAccount customer = customerAccountRepository.findById(customerAccountId)
-                .orElseThrow(() -> new ApiException(ErrorCode.FORBIDDEN, "Customer account not found", HttpStatus.FORBIDDEN));
+                .orElseThrow(() -> new ForbiddenException("Customer account not found"));
         if (customer.getStatus() != UserStatus.ACTIVE) {
             throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "Customer account is suspended or inactive", HttpStatus.FORBIDDEN);
         }
 
         // Revalidate Device status is ACTIVE and matches session device
         if (session.getDeviceId() == null) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Sync session is not bound to a device", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Sync session is not bound to a device");
         }
         UserDevice device = deviceRepository.findById(session.getDeviceId())
-                .orElseThrow(() -> new ApiException(ErrorCode.FORBIDDEN, "Device not found", HttpStatus.FORBIDDEN));
+                .orElseThrow(() -> new ForbiddenException("Device not found"));
         if (device.getStatus() != DeviceStatus.ACTIVE) {
             throw new ApiException(ErrorCode.DEVICE_REVOKED, "Device is revoked or not active", HttpStatus.FORBIDDEN);
         }
@@ -205,24 +205,22 @@ public class SyncServiceImpl implements SyncService {
             throw new ApiException(ErrorCode.SYNC_SESSION_INVALID, "Sync session has expired", HttpStatus.BAD_REQUEST);
         }
 
-        // Finding 15: Recheck entitlement status and validity window
-        Entitlement ent = entitlementRepository.findById(session.getEntitlementId())
-                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+        // Recheck entitlement status and validity window
+        Entitlement ent = entitlementRepository.requireById(session.getEntitlementId());
 
         if (ent.getStatus() != EntitlementStatus.ACTIVE) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement has been revoked or is inactive", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement has been revoked or is inactive");
         }
 
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement validity window has expired", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement validity window has expired");
         }
 
         if (chunkNo < 0 || chunkNo >= session.getTotalChunks()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Invalid chunk number: " + chunkNo + " (total: " + session.getTotalChunks() + ")", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Invalid chunk number: " + chunkNo + " (total: " + session.getTotalChunks() + ")");
         }
 
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, customerUserId, callerRole, "v");
         String boothColumn = scope.boothColumn();
@@ -294,14 +292,14 @@ public class SyncServiceImpl implements SyncService {
     @Transactional
     public SyncSessionResponse completeSyncSession(Long customerUserId, Role callerRole, Long customerAccountId, UUID sessionId) {
         if (callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access denied to complete sync session", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Access denied to complete sync session");
         }
 
         SyncSession session = syncSessionRepository.findById(sessionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Sync session not found"));
 
         if (!session.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Session does not belong to this customer account", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Session does not belong to this customer account");
         }
 
         session.setStatus(SyncStatus.COMPLETED);
@@ -355,7 +353,7 @@ public class SyncServiceImpl implements SyncService {
                 }
             }
         } catch (Exception e) {
-            // Finding 14: Never serve raw bytes if decryption fails; log warning and return null
+            // Never serve raw bytes if decryption fails; log warning and return null
             log.warn("Sync voter mobile decryption failed: {}", e.getMessage());
             return null;
         }

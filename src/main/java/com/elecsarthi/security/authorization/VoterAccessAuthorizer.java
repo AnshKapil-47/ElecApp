@@ -1,10 +1,7 @@
 package com.elecsarthi.security.authorization;
 
 import com.elecsarthi.enums.Role;
-import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.exception.errorcode.ErrorCode;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpStatus;
+import com.elecsarthi.exception.common.ForbiddenException;
 import org.springframework.stereotype.Component;
 
 /**
@@ -12,7 +9,6 @@ import org.springframework.stereotype.Component;
  * Enforces the strict security rule that administrative and agent roles cannot access voter data,
  * and enforces the 3-gate Mobile Number Protection rule.
  */
-@Slf4j
 @Component
 public class VoterAccessAuthorizer {
 
@@ -25,9 +21,7 @@ public class VoterAccessAuthorizer {
      */
     public void validateVoterAccessRole(Role callerRole) {
         if (callerRole == Role.OWNER || callerRole == Role.SUBOWNER || callerRole == Role.AGENT) {
-            throw new ApiException(ErrorCode.FORBIDDEN,
-                    "Administrative and Agent roles are not permitted to access voter data",
-                    HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Administrative and Agent roles are not permitted to access voter data");
         }
     }
 

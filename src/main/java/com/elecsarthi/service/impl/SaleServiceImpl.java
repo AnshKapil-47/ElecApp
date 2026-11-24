@@ -8,7 +8,9 @@ import com.elecsarthi.dto.response.SaleResponse;
 import com.elecsarthi.entity.*;
 import com.elecsarthi.enums.*;
 import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.*;
@@ -65,28 +67,26 @@ public class SaleServiceImpl implements SaleService {
                 .orElseThrow(() -> new ResourceNotFoundException("Agent user not found"));
 
         if (agentUser.getRole() != Role.AGENT) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only agents can perform sales", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only agents can perform sales");
         }
 
-        CustomerAccount customer = customerAccountRepository.findById(request.getCustomerAccountId())
-                .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+        CustomerAccount customer = customerAccountRepository.requireById(request.getCustomerAccountId());
 
         if (customer.getStatus() != UserStatus.ACTIVE) {
             throw new ApiException(ErrorCode.ACCOUNT_SUSPENDED, "Customer account is suspended or not active", HttpStatus.BAD_REQUEST);
         }
 
         if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(agentUserId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "You are not the owning agent for this customer", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("You are not the owning agent for this customer");
         }
 
-        ElectionType electionType = electionTypeRepository.findById(request.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(request.getElectionTypeId());
 
         if (!electionType.isActive()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Election type is not active", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Election type is not active");
         }
 
-        // Canonical string for idempotency check (Finding 21: use normalized canonical JSON)
+        // Canonical string for idempotency check (use normalized canonical JSON)
         List<CriteriaNormalizer.NormalizedCriteria> normalizedLines = new ArrayList<>();
         for (SaleLineRequest lineReq : request.getLines()) {
             normalizedLines.add(criteriaNormalizer.normalize(electionType, lineReq.getCriteria()));
@@ -127,7 +127,7 @@ public class SaleServiceImpl implements SaleService {
         for (SaleLineRequest lineReq : request.getLines()) {
             CriteriaNormalizer.NormalizedCriteria normalized = criteriaNormalizer.normalize(electionType, lineReq.getCriteria());
             if (!seenHashes.add(normalized.getCriteriaHash())) {
-                throw new ApiException(ErrorCode.BAD_REQUEST, "Duplicate criteria among sale lines: " + normalized.getScopeLabel(), HttpStatus.BAD_REQUEST);
+                throw new BadRequestException("Duplicate criteria among sale lines: " + normalized.getScopeLabel());
             }
 
             // Area resolution
@@ -159,9 +159,7 @@ public class SaleServiceImpl implements SaleService {
             // MASTER tier check
             if (request.getStorageTier() == DatasetTier.MASTER) {
                 if (dataset.getDeleteAfter() != null && validUntil.isAfter(dataset.getDeleteAfter())) {
-                    throw new ApiException(ErrorCode.BAD_REQUEST,
-                            "Validity until " + validUntil + " exceeds MASTER dataset expiration " + dataset.getDeleteAfter(),
-                            HttpStatus.BAD_REQUEST);
+                    throw new BadRequestException("Validity until " + validUntil + " exceeds MASTER dataset expiration " + dataset.getDeleteAfter());
                 }
             }
 
@@ -245,7 +243,7 @@ public class SaleServiceImpl implements SaleService {
                     .build());
         }
 
-        // Finding 17: Update LONG_TERM dataset delete_after to max(validUntil) + 30 days
+        // Update LONG_TERM dataset delete_after to max(validUntil) + 30 days
         for (ProcessedLine pl : processedLines) {
             if (pl.dataset.getStorageTier() == DatasetTier.LONG_TERM) {
                 recomputeLongTermRetention(pl.dataset.getId(), now);
@@ -278,14 +276,14 @@ public class SaleServiceImpl implements SaleService {
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         if (owner.getRole() != Role.OWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only OWNER can void a sale", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only OWNER can void a sale");
         }
 
         AgentSale sale = agentSaleRepository.findById(saleId)
                 .orElseThrow(() -> new ResourceNotFoundException("Sale not found"));
 
         if (sale.getStatus() == SaleStatus.VOIDED) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Sale is already voided", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Sale is already voided");
         }
 
         Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
@@ -314,7 +312,7 @@ public class SaleServiceImpl implements SaleService {
             });
         }
 
-        // Finding 17: Recompute delete_after for affected LONG_TERM datasets
+        // Recompute delete_after for affected LONG_TERM datasets
         for (Long dsId : affectedDatasetIds) {
             recomputeLongTermRetention(dsId, now);
         }
@@ -325,7 +323,7 @@ public class SaleServiceImpl implements SaleService {
             customerAccountRepository.save(ca);
         });
 
-        // Finding 12: Safe audit logging with Map
+        // Safe audit logging with Map
         auditService.logDetails(ownerUserId, sale.getCustomerAccountId(), null, null,
                 "SALE_VOIDED", AuditOutcome.SUCCESS,
                 "agent_sale", sale.getId().toString(),
@@ -345,11 +343,11 @@ public class SaleServiceImpl implements SaleService {
                 .orElseThrow(() -> new ResourceNotFoundException("Sale not found"));
 
         if (callerRole == Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subowners are not permitted to view sales records", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Subowners are not permitted to view sales records");
         }
 
         if (callerRole == Role.AGENT && !sale.getSoldByUserId().equals(callerUserId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Agents can only view their own sales", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Agents can only view their own sales");
         }
 
         String code = electionTypeRepository.findById(sale.getElectionTypeId())
@@ -376,14 +374,13 @@ public class SaleServiceImpl implements SaleService {
     @Transactional(readOnly = true)
     public List<SaleResponse> getSalesByCustomer(Long callerUserId, Role callerRole, Long customerAccountId) {
         if (callerRole == Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subowners cannot view sales records", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Subowners cannot view sales records");
         }
 
         if (callerRole == Role.AGENT) {
-            CustomerAccount customer = customerAccountRepository.findById(customerAccountId)
-                    .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+            CustomerAccount customer = customerAccountRepository.requireById(customerAccountId);
             if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "You are not the owning agent for this customer", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("You are not the owning agent for this customer");
             }
         }
 
@@ -491,7 +488,7 @@ public class SaleServiceImpl implements SaleService {
             case DAY -> end = start.plusDays(durationValue);
             case WEEK -> end = start.plusWeeks(durationValue);
             case MONTH -> end = start.plusMonths(durationValue);
-            default -> throw new ApiException(ErrorCode.BAD_REQUEST, "Unsupported duration unit: " + durationUnit, HttpStatus.BAD_REQUEST);
+            default -> throw new BadRequestException("Unsupported duration unit: " + durationUnit);
         }
         return end.toInstant();
     }

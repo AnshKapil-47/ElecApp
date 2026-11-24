@@ -16,13 +16,8 @@ import java.util.UUID;
 @Repository
 public interface UserSessionRepository extends JpaRepository<UserSession, UUID> {
     Optional<UserSession> findByIdAndStatus(UUID id, SessionStatus status);
-    Optional<UserSession> findByRefreshTokenHash(String refreshTokenHash);
     List<UserSession> findByUserIdAndStatus(Long userId, SessionStatus status);
     long countByUserIdAndStatus(Long userId, SessionStatus status);
-
-    @Modifying
-    @Query("UPDATE UserSession s SET s.status = :status, s.terminatedAt = :now, s.terminationReason = :reason, s.terminatedByUserId = :byUser WHERE s.userId = :userId AND s.status = 'ACTIVE'")
-    void terminateAllActiveByUserId(@Param("userId") Long userId, @Param("status") SessionStatus status, @Param("now") Instant now, @Param("reason") String reason, @Param("byUser") Long byUser);
 
     @Modifying
     @Query("UPDATE UserSession s SET s.status = :status, s.terminatedAt = :now, s.terminationReason = :reason, s.terminatedByUserId = :byUser WHERE s.deviceId = :deviceId AND s.status = 'ACTIVE'")

@@ -11,7 +11,9 @@ import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.*;
 import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.AppUserRepository;
@@ -53,7 +55,7 @@ public class SubuserServiceImpl implements SubuserService {
     @Transactional
     public SubuserDetailResponse createSubuser(Long customerUserId, Role callerRole, Long customerAccountId, CreateSubuserRequest request) {
         if (callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only Customer accounts can create Subusers", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only Customer accounts can create Subusers");
         }
 
         if (userRepository.existsByUsername(request.getUsername().trim())) {
@@ -95,44 +97,40 @@ public class SubuserServiceImpl implements SubuserService {
     @Transactional
     public BoothAssignmentResponse assignBooth(Long customerUserId, Role callerRole, Long customerAccountId, Long subuserId, CreateBoothAssignmentRequest request) {
         if (callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only Customer accounts can assign booths to Subusers", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only Customer accounts can assign booths to Subusers");
         }
 
         AppUser subuser = userRepository.findById(subuserId)
                 .orElseThrow(() -> new ResourceNotFoundException("Subuser not found"));
 
         if (subuser.getRole() != Role.SUBUSER || !customerAccountId.equals(subuser.getCustomerAccountId())) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Invalid subuser for this customer account", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Invalid subuser for this customer account");
         }
 
         if (subuser.getStatus() != UserStatus.ACTIVE) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Subuser account is not active", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Subuser account is not active");
         }
 
-        Entitlement ent = entitlementRepository.findById(request.getEntitlementId())
-                .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+        Entitlement ent = entitlementRepository.requireById(request.getEntitlementId());
 
         if (!customerAccountId.equals(ent.getCustomerAccountId()) || ent.getStatus() != EntitlementStatus.ACTIVE) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement is not active or belongs to another customer", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement is not active or belongs to another customer");
         }
 
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Entitlement is expired or not yet active", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Entitlement is expired or not yet active");
         }
 
         Instant validFrom = now;
         Instant validUntil = validFrom.plus(request.getDurationDays(), ChronoUnit.DAYS);
 
         if (validUntil.isAfter(ent.getValidUntil())) {
-            throw new ApiException(ErrorCode.BAD_REQUEST,
-                    "Booth assignment validity (" + validUntil + ") cannot exceed entitlement expiration (" + ent.getValidUntil() + ")",
-                    HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Booth assignment validity (" + validUntil + ") cannot exceed entitlement expiration (" + ent.getValidUntil() + ")");
         }
 
         // Verify booth exists within entitlement area
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
         String boothColumn = electionType.getBoothColumn();
 
         StringBuilder checkSql = new StringBuilder("SELECT 1 FROM voter v WHERE v.dataset_id = ? AND v.")
@@ -146,9 +144,7 @@ public class SubuserServiceImpl implements SubuserService {
 
         List<Integer> matches = jdbcTemplate.query(checkSql.toString(), (rs, rowNum) -> rs.getInt(1), checkParams.toArray());
         if (matches.isEmpty()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST,
-                    "Booth " + request.getBoothValue() + " does not exist within the area of this entitlement",
-                    HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Booth " + request.getBoothValue() + " does not exist within the area of this entitlement");
         }
 
         // Verify slot and booth conflicts
@@ -197,15 +193,15 @@ public class SubuserServiceImpl implements SubuserService {
                 .orElseThrow(() -> new ResourceNotFoundException("Booth assignment not found"));
 
         if (callerRole != Role.OWNER && callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only Customer or Owner support can revoke booth assignments", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only Customer or Owner support can revoke booth assignments");
         }
 
         if (callerRole == Role.CUSTOMER && !assignment.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Cannot revoke booth assignment for another customer account", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Cannot revoke booth assignment for another customer account");
         }
 
         if (assignment.getStatus() == BoothAssignmentStatus.REVOKED) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Booth assignment is already revoked", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Booth assignment is already revoked");
         }
 
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
@@ -230,7 +226,7 @@ public class SubuserServiceImpl implements SubuserService {
     @Transactional(readOnly = true)
     public List<SubuserDetailResponse> getSubusers(Long callerUserId, Role callerRole, Long customerAccountId) {
         if (callerRole != Role.CUSTOMER && callerRole != Role.OWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access denied to subuser list", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Access denied to subuser list");
         }
 
         Instant now = Instant.now();
@@ -265,7 +261,7 @@ public class SubuserServiceImpl implements SubuserService {
                 .orElseThrow(() -> new ResourceNotFoundException("Subuser not found"));
 
         if (!customerAccountId.equals(subuser.getCustomerAccountId())) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access denied to subuser", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Access denied to subuser");
         }
 
         Instant now = Instant.now();

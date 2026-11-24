@@ -36,3 +36,18 @@ build/
 .env
 .env.local
 .env.*.local
+
+### Secrets and local settings ###
+.env.*
+!.env.example
+*.pem
+*.key
+*.jks
+*.p12
+secrets/
+.claude/settings.local.json
+CLAUDE.local.md
+
+### Generated ###
+docs/data-model/*.dot
+__pycache__/

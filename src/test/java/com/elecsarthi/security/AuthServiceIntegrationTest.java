@@ -10,7 +10,6 @@ import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.UserDevice;
 import com.elecsarthi.enums.*;
 import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.DeviceNonceRepository;
@@ -26,7 +25,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;

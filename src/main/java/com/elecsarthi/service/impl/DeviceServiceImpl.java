@@ -13,8 +13,11 @@ import com.elecsarthi.enums.DeviceStatus;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.SessionStatus;
 import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
+import com.elecsarthi.exception.common.UnauthorizedException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
@@ -86,10 +89,10 @@ public class DeviceServiceImpl implements DeviceService {
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         if (user.getRole() == Role.OWNER || user.getRole() == Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Owner and Subowner users use the web application only.", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Owner and Subowner users use the web application only.");
         }
 
-        // Finding N1: Prevent password-only device replacement. If an active device exists, reject registration.
+        // Prevent password-only device replacement. If an active device exists, reject registration.
         Optional<UserDevice> activeOpt = deviceRepository.findByUserIdAndStatus(userId, DeviceStatus.ACTIVE);
         if (activeOpt.isPresent()) {
             throw new ApiException(ErrorCode.DEVICE_CHANGE_NOT_ALLOWED,
@@ -160,11 +163,11 @@ public class DeviceServiceImpl implements DeviceService {
             String lockKey = "reg_jti_" + registrationJti.trim();
             jdbcTemplate.query("SELECT pg_advisory_xact_lock(hashtext(?))", rs -> null, lockKey);
             if (tokenProvider.isRegistrationJtiInvalid(registrationJti.trim())) {
-                throw new ApiException(ErrorCode.UNAUTHORIZED, "Registration token has already been consumed or invalidated.", HttpStatus.UNAUTHORIZED);
+                throw new UnauthorizedException("Registration token has already been consumed or invalidated.");
             }
         }
 
-        // Finding N1: Reject activation if an active device already exists for this user
+        // Reject activation if an active device already exists for this user
         Optional<UserDevice> currentActive = deviceRepository.findByUserIdAndStatus(userId, DeviceStatus.ACTIVE);
         if (currentActive.isPresent()) {
             throw new ApiException(ErrorCode.DEVICE_CHANGE_NOT_ALLOWED,
@@ -176,13 +179,13 @@ public class DeviceServiceImpl implements DeviceService {
                 .orElseThrow(() -> new ResourceNotFoundException("Device not found"));
 
         if (!pendingDevice.getUserId().equals(userId) || pendingDevice.getStatus() != DeviceStatus.PENDING) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Invalid pending device verification request", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Invalid pending device verification request");
         }
 
         Instant now = clock.instant();
         if (pendingDevice.getChallengeExpiresAt().isBefore(now)) {
             deviceRepository.delete(pendingDevice);
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Device challenge has expired. Please re-register.", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Device challenge has expired. Please re-register.");
         }
 
         // Verify ECDSA signature
@@ -222,34 +225,33 @@ public class DeviceServiceImpl implements DeviceService {
         UserDevice device = deviceRepository.findById(deviceId)
                 .orElseThrow(() -> new ResourceNotFoundException("Device not found"));
 
-        // Finding N1: Role-based revocation authorization
+        // Role-based revocation authorization
         if (callerRole == Role.OWNER || callerRole == Role.SUBOWNER) {
             // Owner and Subowner have authority to revoke any device
         } else if (callerRole == Role.AGENT) {
             // Agent can only revoke devices belonging to customers assigned to this agent (or their subusers)
             if (device.getCustomerAccountId() == null) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Agents can only revoke devices for their assigned customers.", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Agents can only revoke devices for their assigned customers.");
             }
-            CustomerAccount customer = customerAccountRepository.findById(device.getCustomerAccountId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Customer account not found"));
+            CustomerAccount customer = customerAccountRepository.requireById(device.getCustomerAccountId());
             if (!callerUserId.equals(customer.getOwningAgentUserId())) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Agents can only revoke devices for their assigned customers.", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Agents can only revoke devices for their assigned customers.");
             }
         } else if (callerRole == Role.CUSTOMER) {
             // Customer can only revoke subordinate SUBUSER devices within their own customer account
             AppUser callerUser = userRepository.findById(callerUserId)
                     .orElseThrow(() -> new ResourceNotFoundException("User not found"));
             if (device.getCustomerAccountId() == null || !device.getCustomerAccountId().equals(callerUser.getCustomerAccountId())) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Customers can only revoke devices belonging to their own organization.", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Customers can only revoke devices belonging to their own organization.");
             }
             AppUser deviceUser = userRepository.findById(device.getUserId())
                     .orElseThrow(() -> new ResourceNotFoundException("Device user not found"));
             if (deviceUser.getRole() != Role.SUBUSER) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Customers can only revoke devices belonging to subordinate subusers.", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Customers can only revoke devices belonging to subordinate subusers.");
             }
         } else {
             // SUBUSER cannot revoke any device
-            throw new ApiException(ErrorCode.FORBIDDEN, "Subusers cannot revoke devices.", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Subusers cannot revoke devices.");
         }
 
         Instant now = clock.instant();
@@ -298,12 +300,12 @@ public class DeviceServiceImpl implements DeviceService {
         long windowMs = appProperties.getSecurity().getDeviceSignatureWindowMinutes() * 60L * 1000L;
 
         if (Math.abs(nowMs - timestampEpochMs) > windowMs) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Signed request timestamp outside allowed window", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Signed request timestamp outside allowed window");
         }
 
         // Monotonic counter verification
         if (counter <= device.getLastRequestCounter()) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Request counter is not strictly increasing", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Request counter is not strictly increasing");
         }
 
         // Nonce uniqueness

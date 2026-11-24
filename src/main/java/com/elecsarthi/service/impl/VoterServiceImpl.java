@@ -7,13 +7,13 @@ import com.elecsarthi.entity.*;
 import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.EntitlementStatus;
 import com.elecsarthi.enums.Role;
-import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
-import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.*;
 import com.elecsarthi.security.authorization.VoterAccessAuthorizer;
-import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.VoterService;
@@ -25,7 +25,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -77,12 +76,11 @@ public class VoterServiceImpl implements VoterService {
     @Transactional(readOnly = true)
     public Page<VoterSummaryResponse> searchVoters(Long callerUserId, Role callerRole, Long customerAccountId, VoterSearchRequest request) {
         if (request.getEntitlementId() == null) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Entitlement ID is required", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Entitlement ID is required");
         }
 
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
         String boothColumn = scope.boothColumn();
@@ -214,8 +212,7 @@ public class VoterServiceImpl implements VoterService {
     @Transactional(readOnly = true)
     public VoterDetailResponse getVoterDetail(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId, Long voterId) {
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, entitlementId);
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
         String boothColumn = scope.boothColumn();
@@ -282,8 +279,7 @@ public class VoterServiceImpl implements VoterService {
     @Transactional(readOnly = true)
     public List<VoterSummaryResponse> getFamilyMembers(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId, Long voterId) {
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, entitlementId);
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
         String boothColumn = scope.boothColumn();
@@ -360,8 +356,7 @@ public class VoterServiceImpl implements VoterService {
     @Transactional(readOnly = true)
     public VoterSlipResponse getVoterSlip(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId, Long voterId) {
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, entitlementId);
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
         String boothColumn = scope.boothColumn();
@@ -427,13 +422,13 @@ public class VoterServiceImpl implements VoterService {
     @Transactional
     public void updateGlobalMobileNumbersEnabled(Long ownerUserId, Role callerRole, boolean enabled) {
         if (callerRole != Role.OWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only OWNER can toggle global mobile numbers setting", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only OWNER can toggle global mobile numbers setting");
         }
 
         // 1. Update memory configuration
         appProperties.setMobileNumbersEnabled(enabled);
 
-        // 2. Audit the toggle to audit_log (Finding 13: persistent, audited)
+        // 2. Audit the toggle to audit_log (persistent, audited)
         auditService.log(ownerUserId, null, null, null,
                 "GLOBAL_MOBILE_TOGGLE", AuditOutcome.SUCCESS,
                 "system_setting", "mobile_numbers_enabled",
@@ -472,16 +467,16 @@ public class VoterServiceImpl implements VoterService {
                 .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found: " + entitlementId));
 
         if (!ent.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement does not belong to your customer account", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement does not belong to your customer account");
         }
 
         if (ent.getStatus() != EntitlementStatus.ACTIVE) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement is revoked or not active", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement is revoked or not active");
         }
 
         Instant now = Instant.now();
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement has expired or is not yet active", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement has expired or is not yet active");
         }
 
         return ent;
@@ -509,7 +504,7 @@ public class VoterServiceImpl implements VoterService {
                 }
             }
         } catch (Exception e) {
-            // Finding 14: Never serve raw bytes if decryption fails; log warning and return null
+            // Never serve raw bytes if decryption fails; log warning and return null
             log.warn("Voter mobile number decryption failed: {}", e.getMessage());
             return null;
         }

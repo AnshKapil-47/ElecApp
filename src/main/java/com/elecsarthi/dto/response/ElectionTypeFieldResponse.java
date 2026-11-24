@@ -1,7 +1,7 @@
 package com.elecsarthi.dto.response;
 
-import com.elecsarthi.enums.FieldValueType;
 import com.elecsarthi.enums.FieldUsage;
+import com.elecsarthi.enums.FieldValueType;
 import lombok.*;
 
 @Getter

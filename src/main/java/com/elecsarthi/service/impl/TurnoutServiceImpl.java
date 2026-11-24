@@ -12,17 +12,15 @@ import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.EntitlementStatus;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.TurnoutSource;
-import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
-import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
-import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.service.TurnoutService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,16 +42,15 @@ public class TurnoutServiceImpl implements TurnoutService {
     @Transactional
     public TurnoutResponse markVoted(Long callerUserId, Role callerRole, Long customerAccountId, MarkTurnoutRequest request) {
         if (callerRole != Role.CUSTOMER && callerRole != Role.SUBUSER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only Customers and Subusers can mark turnout", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only Customers and Subusers can mark turnout");
         }
 
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
 
-        // Verify voter is within the entitlement geographical boundary AND subuser assigned booth (Finding 2, 16)
+        // Verify voter is within the entitlement geographical boundary AND subuser assigned booth
         String checkSql = "SELECT 1 FROM voter v WHERE v.id = ? AND " + scope.whereClause();
         List<Object> checkParams = new ArrayList<>();
         checkParams.add(request.getVoterRowId());
@@ -85,12 +82,11 @@ public class TurnoutServiceImpl implements TurnoutService {
     @Transactional
     public void unmarkVoted(Long callerUserId, Role callerRole, Long customerAccountId, UnmarkTurnoutRequest request) {
         if (callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only the Customer can unmark turnout online; Subusers are strictly forbidden", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only the Customer can unmark turnout online; Subusers are strictly forbidden");
         }
 
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
 
@@ -113,16 +109,15 @@ public class TurnoutServiceImpl implements TurnoutService {
     @Transactional
     public void resetTurnout(Long callerUserId, Role callerRole, Long customerAccountId, ResetTurnoutRequest request) {
         if (callerRole != Role.CUSTOMER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only the Customer can reset turnout", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only the Customer can reset turnout");
         }
 
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
 
-        // Finding 16: Ensure turnout reset is strictly limited to this entitlement area, never across other ACs
+        // Ensure turnout reset is strictly limited to this entitlement area, never across other ACs
         StringBuilder deleteSql = new StringBuilder("DELETE FROM voter_turnout vt WHERE vt.dataset_id = ? AND vt.customer_account_id = ? ")
                 .append("AND vt.voter_row_id IN (SELECT v.id FROM voter v WHERE ").append(scope.whereClause());
 
@@ -145,19 +140,18 @@ public class TurnoutServiceImpl implements TurnoutService {
     @Transactional(readOnly = true)
     public TurnoutStatisticsResponse getTurnoutStatistics(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId, Integer boothNo) {
         if (callerRole != Role.CUSTOMER && callerRole != Role.SUBUSER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Access denied to turnout statistics", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Access denied to turnout statistics");
         }
 
         Entitlement ent = validateAccessAndGetEntitlement(callerUserId, callerRole, customerAccountId, entitlementId);
-        ElectionType electionType = electionTypeRepository.findById(ent.getElectionTypeId())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found"));
+        ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
 
         VoterScope scope = voterScopeAuthorizer.buildVoterScope(ent, electionType, callerUserId, callerRole, "v");
         String boothColumn = scope.boothColumn();
 
         if (callerRole == Role.SUBUSER && boothNo != null) {
             if (scope.allowedBooths() != null && !scope.allowedBooths().contains(boothNo)) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Access to unassigned booth statistics is forbidden", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Access to unassigned booth statistics is forbidden");
             }
         }
 
@@ -247,23 +241,23 @@ public class TurnoutServiceImpl implements TurnoutService {
 
     private Entitlement validateAccessAndGetEntitlement(Long callerUserId, Role callerRole, Long customerAccountId, Long entitlementId) {
         if (callerRole == Role.OWNER || callerRole == Role.SUBOWNER || callerRole == Role.AGENT) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Administrative and Agent roles are not permitted to access voter turnout", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Administrative and Agent roles are not permitted to access voter turnout");
         }
 
         Entitlement ent = entitlementRepository.findById(entitlementId)
                 .orElseThrow(() -> new ResourceNotFoundException("Entitlement not found: " + entitlementId));
 
         if (!ent.getCustomerAccountId().equals(customerAccountId)) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement does not belong to your customer account", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement does not belong to your customer account");
         }
 
         if (ent.getStatus() != EntitlementStatus.ACTIVE) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement is not active", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement is not active");
         }
 
         Instant now = Instant.now();
         if (now.isBefore(ent.getValidFrom()) || !now.isBefore(ent.getValidUntil())) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement is expired or not yet valid", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement is expired or not yet valid");
         }
 
         return ent;

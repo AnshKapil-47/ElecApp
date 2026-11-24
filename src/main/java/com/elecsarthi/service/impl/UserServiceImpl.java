@@ -10,18 +10,17 @@ import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.SessionStatus;
 import com.elecsarthi.enums.UserStatus;
-import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ConflictException;
+import com.elecsarthi.exception.common.ForbiddenException;
+import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.UserSessionRepository;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.UserService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,7 +29,6 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
@@ -108,7 +106,7 @@ public class UserServiceImpl implements UserService {
     @Transactional(readOnly = true)
     public UserDetailResponse getUser(Long id) {
         AppUser user = userRepository.findById(id)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "User not found with ID: " + id, HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with ID: " + id));
 
         int activeSessions = sessionRepository.findByUserIdAndStatus(id, SessionStatus.ACTIVE).size();
         return mapToDetail(user, activeSessions);
@@ -118,7 +116,7 @@ public class UserServiceImpl implements UserService {
     @Transactional
     public void updateUserStatus(Long id, UserStatus newStatus, Long callerUserId, Role callerRole) {
         AppUser user = userRepository.findById(id)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "User not found with ID: " + id, HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with ID: " + id));
 
         validateCanManageUser(callerRole, user);
 
@@ -138,7 +136,7 @@ public class UserServiceImpl implements UserService {
     @Transactional
     public void resetPassword(Long id, String newPassword, Long callerUserId, Role callerRole) {
         AppUser user = userRepository.findById(id)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "User not found with ID: " + id, HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with ID: " + id));
 
         validateCanManageUser(callerRole, user);
 
@@ -158,7 +156,7 @@ public class UserServiceImpl implements UserService {
     @Transactional
     public void terminateUserSessions(Long id, String reason, Long callerUserId, Role callerRole) {
         AppUser user = userRepository.findById(id)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "User not found with ID: " + id, HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with ID: " + id));
 
         validateCanManageUser(callerRole, user);
 
@@ -183,11 +181,11 @@ public class UserServiceImpl implements UserService {
         if (callerRole == Role.SUBOWNER) {
             // Subowner can only manage AGENT users
             if (targetUser.getRole() != Role.AGENT) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Subowners can only manage Agents.", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Subowners can only manage Agents.");
             }
             return;
         }
-        throw new ApiException(ErrorCode.FORBIDDEN, "You do not have permission to manage this user.", HttpStatus.FORBIDDEN);
+        throw new ForbiddenException("You do not have permission to manage this user.");
     }
 
     private UserSummaryResponse mapToSummary(AppUser u) {

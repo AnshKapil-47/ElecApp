@@ -14,8 +14,10 @@ import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.SessionStatus;
 import com.elecsarthi.enums.UserStatus;
-import com.elecsarthi.exception.common.ApiException;
+import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
+import com.elecsarthi.exception.common.ForbiddenException;
+import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.mapper.CustomerMapper;
 import com.elecsarthi.repository.AppUserRepository;
@@ -25,10 +27,8 @@ import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.CustomerService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -39,7 +39,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
 public class CustomerServiceImpl implements CustomerService {
@@ -72,9 +71,9 @@ public class CustomerServiceImpl implements CustomerService {
         } else if (callerRole == Role.OWNER || callerRole == Role.SUBOWNER) {
             if (request.getOwningAgentUserId() != null) {
                 AppUser agent = userRepository.findById(request.getOwningAgentUserId())
-                        .orElseThrow(() -> new ApiException(ErrorCode.BAD_REQUEST, "Owning agent not found: " + request.getOwningAgentUserId(), HttpStatus.BAD_REQUEST));
+                        .orElseThrow(() -> new BadRequestException("Owning agent not found: " + request.getOwningAgentUserId()));
                 if (agent.getRole() != Role.AGENT || agent.getStatus() != UserStatus.ACTIVE) {
-                    throw new ApiException(ErrorCode.BAD_REQUEST, "Owning agent must be an active AGENT user.", HttpStatus.BAD_REQUEST);
+                    throw new BadRequestException("Owning agent must be an active AGENT user.");
                 }
                 owningAgentUserId = agent.getId();
             }
@@ -142,7 +141,7 @@ public class CustomerServiceImpl implements CustomerService {
         CustomerAccount customer = getCustomerScoped(customerId, callerUserId, callerRole);
 
         if (customer.getActivationStatus() == ActivationStatus.ACTIVATED) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Account has already been activated.", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Account has already been activated.");
         }
 
         String newCode = generateCrockfordCode(10);
@@ -176,11 +175,11 @@ public class CustomerServiceImpl implements CustomerService {
     @Transactional
     public void suspendCustomer(Long customerId, String reason, Long callerUserId, Role callerRole) {
         if (callerRole != Role.OWNER && callerRole != Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only Owner or Subowner can suspend customer accounts.", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only Owner or Subowner can suspend customer accounts.");
         }
 
         CustomerAccount customer = customerAccountRepository.findById(customerId)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Customer not found: " + customerId, HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("Customer not found: " + customerId));
 
         Instant now = clock.instant();
         customer.setStatus(UserStatus.SUSPENDED);
@@ -218,11 +217,11 @@ public class CustomerServiceImpl implements CustomerService {
     @Transactional
     public void reactivateCustomer(Long customerId, Long callerUserId, Role callerRole) {
         if (callerRole != Role.OWNER && callerRole != Role.SUBOWNER) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Only Owner or Subowner can reactivate customer accounts.", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Only Owner or Subowner can reactivate customer accounts.");
         }
 
         CustomerAccount customer = customerAccountRepository.findById(customerId)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Customer not found: " + customerId, HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("Customer not found: " + customerId));
 
         customer.setStatus(UserStatus.ACTIVE);
         customer.setSuspensionReason(null);
@@ -240,13 +239,13 @@ public class CustomerServiceImpl implements CustomerService {
     @Transactional
     public void reassignAgent(Long customerId, Long newAgentId, Long callerUserId) {
         CustomerAccount customer = customerAccountRepository.findById(customerId)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Customer not found: " + customerId, HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("Customer not found: " + customerId));
 
         AppUser newAgent = userRepository.findById(newAgentId)
-                .orElseThrow(() -> new ApiException(ErrorCode.BAD_REQUEST, "New owning agent user not found: " + newAgentId, HttpStatus.BAD_REQUEST));
+                .orElseThrow(() -> new BadRequestException("New owning agent user not found: " + newAgentId));
 
         if (newAgent.getRole() != Role.AGENT || newAgent.getStatus() != UserStatus.ACTIVE) {
-            throw new ApiException(ErrorCode.BAD_REQUEST, "Owning agent must be an active AGENT user.", HttpStatus.BAD_REQUEST);
+            throw new BadRequestException("Owning agent must be an active AGENT user.");
         }
 
         Long oldAgentId = customer.getOwningAgentUserId();
@@ -279,12 +278,12 @@ public class CustomerServiceImpl implements CustomerService {
 
     private CustomerAccount getCustomerScoped(Long customerId, Long callerUserId, Role callerRole) {
         CustomerAccount customer = customerAccountRepository.findById(customerId)
-                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Customer not found.", HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResourceNotFoundException("Customer not found."));
 
         if (callerRole == Role.AGENT) {
             if (customer.getOwningAgentUserId() == null || !customer.getOwningAgentUserId().equals(callerUserId)) {
                 // Return 404 so existence is not leaked to unauthorized agents
-                throw new ApiException(ErrorCode.RESOURCE_NOT_FOUND, "Customer not found.", HttpStatus.NOT_FOUND);
+                throw new ResourceNotFoundException("Customer not found.");
             }
         }
         return customer;

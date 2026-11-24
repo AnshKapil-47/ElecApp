@@ -3,7 +3,6 @@ package com.elecsarthi.security.signing;
 import com.elecsarthi.config.AppProperties;
 import com.elecsarthi.security.device.CryptoUtils;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -13,7 +12,6 @@ import java.util.HexFormat;
 /**
  * Handles Ed25519 digital signing and verification for offline booth leases.
  */
-@Slf4j
 @Component
 @RequiredArgsConstructor
 public class OfflineLeaseSigner {
@@ -32,25 +30,6 @@ public class OfflineLeaseSigner {
         byte[] signatureBytes = CryptoUtils.signEd25519(
                 payloadSha256.getBytes(StandardCharsets.UTF_8), privateKeyBytes);
         return Base64.getEncoder().encodeToString(signatureBytes);
-    }
-
-    /**
-     * Verifies an Ed25519 signature of a lease payload using the provided Ed25519 public key.
-     *
-     * @param payloadSha256   Hex-encoded SHA-256 hash of the payload
-     * @param base64Signature Base64-encoded signature
-     * @param publicKeyBytes  32-byte Ed25519 public key
-     * @return true if valid
-     */
-    public boolean verifyLeaseSignature(String payloadSha256, String base64Signature, byte[] publicKeyBytes) {
-        try {
-            byte[] signatureBytes = Base64.getDecoder().decode(base64Signature);
-            return CryptoUtils.verifyEd25519(
-                    payloadSha256.getBytes(StandardCharsets.UTF_8), signatureBytes, publicKeyBytes);
-        } catch (Exception e) {
-            log.warn("Failed to verify Ed25519 lease signature: {}", e.getMessage());
-            return false;
-        }
     }
 
     /**

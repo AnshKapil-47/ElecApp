@@ -3,12 +3,12 @@ package com.elecsarthi.repository;
 import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.DatasetTier;
 import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.exception.common.ResourceNotFoundException;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -31,9 +31,7 @@ public interface EntitlementRepository extends JpaRepository<Entitlement, Long> 
                                             @Param("storageTier") DatasetTier storageTier,
                                             @Param("criteriaHash") String criteriaHash);
 
-    @Query("SELECT e FROM Entitlement e WHERE e.id = :id AND e.customerAccountId = :customerAccountId " +
-           "AND e.status = 'ACTIVE' AND e.validFrom <= :now AND :now < e.validUntil")
-    Optional<Entitlement> findValidEntitlement(@Param("id") Long id,
-                                               @Param("customerAccountId") Long customerAccountId,
-                                               @Param("now") Instant now);
+    default Entitlement requireById(Long id) {
+        return findById(id).orElseThrow(() -> new ResourceNotFoundException("Entitlement not found"));
+    }
 }

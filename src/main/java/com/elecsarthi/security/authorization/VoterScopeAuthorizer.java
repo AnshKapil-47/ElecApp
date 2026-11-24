@@ -6,13 +6,11 @@ import com.elecsarthi.entity.ElectionTypeField;
 import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.FieldUsage;
 import com.elecsarthi.enums.Role;
-import com.elecsarthi.exception.common.ApiException;
-import com.elecsarthi.exception.errorcode.ErrorCode;
+import com.elecsarthi.exception.common.ForbiddenException;
 import com.elecsarthi.repository.BoothAssignmentRepository;
 import com.elecsarthi.repository.ElectionTypeFieldRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
 import java.time.Clock;
@@ -66,21 +64,21 @@ public class VoterScopeAuthorizer {
         where.append(prefix).append("dataset_id = ? ");
         params.add(entitlement.getDatasetId());
 
-        // 2. Fail-Closed Entitlement Criteria Validation (Finding 3)
+        // 2. Fail-Closed Entitlement Criteria Validation
         String criteriaJson = entitlement.getCriteria();
         if (criteriaJson == null || criteriaJson.trim().isBlank()) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Entitlement criteria missing or corrupt; access denied.", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Entitlement criteria missing or corrupt; access denied.");
         }
 
         Map<String, Object> criteria;
         try {
             criteria = objectMapper.readValue(criteriaJson, new TypeReference<Map<String, Object>>() {});
         } catch (Exception e) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Malformed entitlement criteria JSON; query rejected.", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Malformed entitlement criteria JSON; query rejected.");
         }
 
         if (criteria == null || criteria.isEmpty()) {
-            throw new ApiException(ErrorCode.FORBIDDEN, "Empty entitlement criteria; queries cannot run across full dataset.", HttpStatus.FORBIDDEN);
+            throw new ForbiddenException("Empty entitlement criteria; queries cannot run across full dataset.");
         }
 
         // Whitelist validation against database metadata for the election type
@@ -100,11 +98,11 @@ public class VoterScopeAuthorizer {
         for (String key : sortedKeys) {
             String col = key.trim().toLowerCase();
             if (!allowedFilterColumns.contains(col)) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Criteria contains unapproved filter column: " + col, HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Criteria contains unapproved filter column: " + col);
             }
             Object val = criteria.get(key);
             if (val == null || (val instanceof String s && s.trim().isEmpty())) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Criteria value for column '" + col + "' cannot be null or empty", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Criteria value for column '" + col + "' cannot be null or empty");
             }
             where.append(" AND ").append(prefix).append(col).append(" = ? ");
             params.add(val);
@@ -119,14 +117,14 @@ public class VoterScopeAuthorizer {
             List<BoothAssignment> assignments = boothAssignmentRepository.findActiveAssignmentsForSubuserAndEntitlement(
                     callerUserId, entitlement.getId(), now);
             if (assignments.isEmpty()) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Subuser has no active booth assignment for this entitlement", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Subuser has no active booth assignment for this entitlement");
             }
             allowedBooths = assignments.stream()
                     .map(BoothAssignment::getBoothValue)
                     .collect(Collectors.toSet());
 
             if (allowedBooths.isEmpty()) {
-                throw new ApiException(ErrorCode.FORBIDDEN, "Subuser has no valid active booths assigned", HttpStatus.FORBIDDEN);
+                throw new ForbiddenException("Subuser has no valid active booths assigned");
             }
 
             where.append(" AND ").append(prefix).append(boothColumn).append(" IN (");

@@ -465,7 +465,7 @@ LIMIT :page_size OFFSET :offset;               -- page_size <= 100
    - `com.elecsarthi.security.jwt`: `JwtTokenProvider` for HMAC-SHA-256 JWT tokens.
    - `com.elecsarthi.security.device`: Device cryptographic utilities (`CryptoUtils`).
    - `com.elecsarthi.security.signing`: Hardware challenge verifier (`DeviceSignatureVerifier`) and Ed25519 offline lease signer (`OfflineLeaseSigner`).
-   - `com.elecsarthi.security.authorization`: Domain access gates (`VoterAccessAuthorizer`, `TenantIsolationAuthorizer`).
+   - `com.elecsarthi.security.authorization`: Domain access gates (`VoterAccessAuthorizer`, `VoterScopeAuthorizer`).
    - `com.elecsarthi.security.service`: Security user principal (`ElecSarthiUserPrincipal`).
    - `com.elecsarthi.exception`: Global exception handler, error codes, and standardized error responses.
    - `com.elecsarthi.config`: Core application configuration (`AppProperties`, `JpaConfig`, `JacksonConfig`).

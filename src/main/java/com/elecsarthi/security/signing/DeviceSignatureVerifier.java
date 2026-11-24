@@ -1,14 +1,12 @@
 package com.elecsarthi.security.signing;
 
 import com.elecsarthi.security.device.CryptoUtils;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
  * Verifies cryptographic signatures from mobile client devices.
  * Uses ECDSA P-256 challenge-response verification.
  */
-@Slf4j
 @Component
 public class DeviceSignatureVerifier {
 

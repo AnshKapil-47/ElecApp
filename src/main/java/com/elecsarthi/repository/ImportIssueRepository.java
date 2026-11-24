@@ -9,5 +9,4 @@ import java.util.List;
 @Repository
 public interface ImportIssueRepository extends JpaRepository<ImportIssue, Long> {
     List<ImportIssue> findByDatasetIdOrderByRowNoAsc(Long datasetId);
-    void deleteByDatasetId(Long datasetId);
 }

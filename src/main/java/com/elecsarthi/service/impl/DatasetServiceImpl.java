@@ -8,9 +8,10 @@ import com.elecsarthi.entity.ImportIssue;
 import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.DatasetStatus;
 import com.elecsarthi.enums.EntitlementStatus;
-import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ConflictException;
+import com.elecsarthi.exception.common.ResourceNotFoundException;
+import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.DatasetRepository;
 import com.elecsarthi.repository.EntitlementRepository;
@@ -57,9 +58,7 @@ public class DatasetServiceImpl implements DatasetService {
         @Transactional(readOnly = true)
         public DatasetDetailResponse getDataset(Long id) {
                 Dataset dataset = datasetRepository.findById(id)
-                                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND,
-                                                "Dataset not found: " + id,
-                                                HttpStatus.NOT_FOUND));
+                                .orElseThrow(() -> new ResourceNotFoundException("Dataset not found: " + id));
 
                 List<ImportIssue> issues = importIssueRepository.findByDatasetIdOrderByRowNoAsc(id);
                 String importerUsername = userRepository.findById(dataset.getImportedByUserId())
@@ -73,9 +72,7 @@ public class DatasetServiceImpl implements DatasetService {
         @Transactional
         public void deleteDataset(Long id, Long callerUserId) {
                 Dataset dataset = datasetRepository.findByIdForUpdate(id)
-                                .orElseThrow(() -> new ApiException(ErrorCode.RESOURCE_NOT_FOUND,
-                                                "Dataset not found: " + id,
-                                                HttpStatus.NOT_FOUND));
+                                .orElseThrow(() -> new ResourceNotFoundException("Dataset not found: " + id));
 
                 if (dataset.getStatus() == DatasetStatus.DELETING) {
                         throw new ConflictException(ErrorCode.CONFLICT, "Dataset is already being deleted.");

@@ -2,7 +2,6 @@ package com.elecsarthi.repository;
 
 import com.elecsarthi.entity.AppUser;
 import com.elecsarthi.enums.Role;
-import com.elecsarthi.enums.UserStatus;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -30,5 +29,4 @@ public interface AppUserRepository extends JpaRepository<AppUser, Long> {
 
     List<AppUser> findByRole(Role role);
     Page<AppUser> findByRole(Role role, Pageable pageable);
-    List<AppUser> findByRoleAndStatus(Role role, UserStatus status);
 }
