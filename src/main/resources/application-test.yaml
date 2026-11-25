@@ -1,9 +1,9 @@
 # The test database is migrated beforehand by tools/db/run_tests.ps1 (the backend itself never runs migrations).
 spring:
   datasource:
-    url: jdbc:postgresql://127.0.0.1:5498/es_test
+    url: jdbc:postgresql://127.0.0.1:5321/es_test
     username: postgres
-    password: ""
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:

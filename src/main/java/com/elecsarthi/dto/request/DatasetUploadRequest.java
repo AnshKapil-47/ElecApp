@@ -1,7 +1,7 @@
 package com.elecsarthi.dto.request;
 
 import com.elecsarthi.enums.DatasetTier;
-import com.elecsarthi.enums.ElectionTypeCode;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
@@ -12,6 +12,12 @@ import lombok.Setter;
 
 import java.util.Map;
 
+/**
+ * Metadata for a dataset upload. Datasets are election-type agnostic: the election type is picked by the
+ * Agent at sale time. Unknown properties (e.g. a legacy {@code electionTypeCode} sent by older web forms)
+ * are ignored.
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
 @Getter
 @Setter
 @NoArgsConstructor
@@ -21,9 +27,6 @@ public class DatasetUploadRequest {
 
     @NotBlank(message = "Dataset name is required.")
     private String name;
-
-    @NotNull(message = "Election type code is required.")
-    private ElectionTypeCode electionTypeCode;
 
     @NotNull(message = "Storage tier is required.")
     private DatasetTier storageTier;

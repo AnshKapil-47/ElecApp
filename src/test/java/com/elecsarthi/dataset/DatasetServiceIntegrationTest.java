@@ -8,12 +8,15 @@ import com.elecsarthi.entity.AppUser;
 import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.Dataset;
 import com.elecsarthi.entity.ElectionType;
+import com.elecsarthi.entity.ElectionTypeField;
 import com.elecsarthi.entity.Entitlement;
 import com.elecsarthi.enums.DatasetStatus;
 import com.elecsarthi.enums.DatasetTier;
 import com.elecsarthi.enums.ElectionTypeCode;
 import com.elecsarthi.enums.EntitlementSource;
 import com.elecsarthi.enums.EntitlementStatus;
+import com.elecsarthi.enums.FieldUsage;
+import com.elecsarthi.enums.FieldValueType;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
@@ -21,8 +24,10 @@ import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.DatasetRepository;
+import com.elecsarthi.repository.ElectionTypeFieldRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
+import com.elecsarthi.service.AreaResolver;
 import com.elecsarthi.service.CriteriaNormalizer;
 import com.elecsarthi.service.DatasetImportService;
 import com.elecsarthi.service.DatasetService;
@@ -39,14 +44,20 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -82,6 +93,15 @@ public class DatasetServiceIntegrationTest {
 
     @Autowired
     private CriteriaNormalizer criteriaNormalizer;
+
+    @Autowired
+    private AreaResolver areaResolver;
+
+    @Autowired
+    private ElectionTypeFieldRepository electionTypeFieldRepository;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -166,7 +186,6 @@ public class DatasetServiceIntegrationTest {
 
         DatasetUploadRequest req = DatasetUploadRequest.builder()
                 .name("Haryana Master AC10")
-                .electionTypeCode(ElectionTypeCode.VIDHAN_SABHA)
                 .storageTier(DatasetTier.MASTER)
                 .build();
 
@@ -200,7 +219,6 @@ public class DatasetServiceIntegrationTest {
 
         DatasetUploadRequest req = DatasetUploadRequest.builder()
                 .name("To Delete")
-                .electionTypeCode(ElectionTypeCode.VIDHAN_SABHA)
                 .storageTier(DatasetTier.MASTER)
                 .build();
 
@@ -229,7 +247,6 @@ public class DatasetServiceIntegrationTest {
 
         DatasetUploadRequest req = DatasetUploadRequest.builder()
                 .name("With Entitlement")
-                .electionTypeCode(ElectionTypeCode.VIDHAN_SABHA)
                 .storageTier(DatasetTier.MASTER)
                 .build();
 
@@ -338,10 +355,93 @@ public class DatasetServiceIntegrationTest {
         }
     }
 
+    @Test
+    @DisplayName("Dataset import is election-type agnostic: one upload (no election type) resolves under every one of the 8 election types")
+    void testUploadWithoutElectionTypeResolvesUnderEveryElectionType() throws IOException {
+        List<ElectionType> types = electionTypeRepository.findAll();
+        assertEquals(8, types.size(), "All 8 election types must be seeded");
+
+        // Everything below is derived from election_type_field / election_type: nothing is hard-coded per type.
+        Map<Short, List<ElectionTypeField>> filtersByType = new HashMap<>();
+        Map<String, FieldValueType> columnTypes = new LinkedHashMap<>();
+        Set<String> guardColumns = new LinkedHashSet<>();
+        for (ElectionType type : types) {
+            List<ElectionTypeField> filters = electionTypeFieldRepository
+                    .findByElectionTypeIdAndUsageOrderByFilterOrderAsc(type.getId(), FieldUsage.FILTER);
+            assertFalse(filters.isEmpty(), type.getCode() + " must define FILTER fields");
+            filtersByType.put(type.getId(), filters);
+            filters.forEach(f -> columnTypes.put(f.getSourceColumn(), f.getValueType()));
+            if (type.getGuardColumn() != null) {
+                guardColumns.add(type.getGuardColumn());
+                columnTypes.putIfAbsent(type.getGuardColumn(), FieldValueType.TEXT);
+            }
+        }
+
+        // One workbook carrying every column any type filters or guards on. Three voters sit inside the area
+        // that every type's criteria describe; a fourth differs in every filter column (guards stay constant).
+        List<String> header = new ArrayList<>(columnTypes.keySet());
+        header.add("serial_no");
+        header.add("voter_id");
+        byte[] bytes;
+        try (XSSFWorkbook workbook = new XSSFWorkbook(); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+            XSSFSheet sheet = workbook.createSheet("Voters");
+            XSSFRow headerRow = sheet.createRow(0);
+            for (int i = 0; i < header.size(); i++) {
+                headerRow.createCell(i).setCellValue(header.get(i));
+            }
+            for (int r = 1; r <= 4; r++) {
+                boolean inside = r <= 3;
+                XSSFRow row = sheet.createRow(r);
+                for (int c = 0; c < header.size(); c++) {
+                    String column = header.get(c);
+                    if ("serial_no".equals(column)) {
+                        row.createCell(c).setCellValue(r);
+                    } else if ("voter_id".equals(column)) {
+                        row.createCell(c).setCellValue("EPICALL" + r);
+                    } else if (columnTypes.get(column) == FieldValueType.INT) {
+                        row.createCell(c).setCellValue(inside ? 7 : 8);
+                    } else if (guardColumns.contains(column)) {
+                        row.createCell(c).setCellValue("GUARD ONE");
+                    } else {
+                        row.createCell(c).setCellValue(inside ? "AREA " + column : "OTHER " + column);
+                    }
+                }
+            }
+            workbook.write(bos);
+            bytes = bos.toByteArray();
+        }
+
+        // the upload metadata carries no election type at all
+        DatasetDetailResponse imported = datasetImportService.importDataset(
+                xlsx("agnostic.xlsx", bytes), masterRequest("Agnostic", null), owner.getId());
+        assertEquals(DatasetStatus.IMPORTED, imported.getStatus());
+        assertEquals(4, imported.getImportedRows());
+
+        // the sale picks the lens: each type resolves to the same dataset and the same three voters
+        for (ElectionType type : types) {
+            Map<String, Object> criteria = new HashMap<>();
+            for (ElectionTypeField filter : filtersByType.get(type.getId())) {
+                String column = filter.getSourceColumn();
+                if (filter.getValueType() == FieldValueType.INT) {
+                    criteria.put(column, 7);
+                } else if (guardColumns.contains(column)) {
+                    criteria.put(column, "GUARD ONE");
+                } else {
+                    criteria.put(column, "AREA " + column);
+                }
+            }
+            CriteriaNormalizer.NormalizedCriteria area = criteriaNormalizer.normalize(type, criteria);
+            new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                Dataset resolved = areaResolver.resolveDataset(DatasetTier.MASTER, type, area);
+                assertEquals(imported.getId(), resolved.getId(), type.getCode() + " must resolve to the uploaded dataset");
+                assertEquals(3, areaResolver.countVoters(resolved.getId(), area), type.getCode() + " must see only its area");
+            });
+        }
+    }
+
     private DatasetUploadRequest masterRequest(String name, Long supersedes) {
         return DatasetUploadRequest.builder()
                 .name(name)
-                .electionTypeCode(ElectionTypeCode.VIDHAN_SABHA)
                 .storageTier(DatasetTier.MASTER)
                 .supersedesDatasetId(supersedes)
                 .build();

@@ -211,9 +211,9 @@ class OwnerWorkflowSecurityIntegrationTest extends SecurityIntegrationTestSuppor
     void malformedRequestsAreClientErrors() throws Exception {
         mockMvc.perform(authed(multipart("/api/v1/datasets/upload").file(metadata()), ownerToken)).andExpect(status().isBadRequest());
         mockMvc.perform(authed(multipart("/api/v1/datasets/upload").file(file()), ownerToken)).andExpect(status().isBadRequest());
-        MockMultipartFile badType = new MockMultipartFile("metadata", "", MediaType.APPLICATION_JSON_VALUE,
-                "{\"name\":\"X\",\"electionTypeCode\":\"NOPE\",\"storageTier\":\"MASTER\"}".getBytes());
-        mockMvc.perform(authed(multipart("/api/v1/datasets/upload").file(file()).file(badType), ownerToken)).andExpect(status().isBadRequest());
+        MockMultipartFile badTier = new MockMultipartFile("metadata", "", MediaType.APPLICATION_JSON_VALUE,
+                "{\"name\":\"X\",\"storageTier\":\"NOPE\"}".getBytes());
+        mockMvc.perform(authed(multipart("/api/v1/datasets/upload").file(file()).file(badTier), ownerToken)).andExpect(status().isBadRequest());
         mockMvc.perform(authed(post("/api/v1/datasets/upload").contentType(MediaType.APPLICATION_JSON).content("{}"), ownerToken))
                 .andExpect(status().isUnsupportedMediaType());
         mockMvc.perform(authed(get("/api/v1/users/not-a-number"), ownerToken)).andExpect(status().isBadRequest());

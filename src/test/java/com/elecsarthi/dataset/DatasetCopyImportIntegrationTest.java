@@ -6,7 +6,6 @@ import com.elecsarthi.entity.AppUser;
 import com.elecsarthi.entity.Dataset;
 import com.elecsarthi.enums.DatasetStatus;
 import com.elecsarthi.enums.DatasetTier;
-import com.elecsarthi.enums.ElectionTypeCode;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
@@ -84,7 +83,6 @@ class DatasetCopyImportIntegrationTest {
                 new MockMultipartFile("file", fileName, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes),
                 DatasetUploadRequest.builder()
                         .name(fileName)
-                        .electionTypeCode(ElectionTypeCode.VIDHAN_SABHA)
                         .storageTier(DatasetTier.MASTER)
                         .build(),
                 owner.getId());

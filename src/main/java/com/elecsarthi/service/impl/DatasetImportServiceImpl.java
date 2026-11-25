@@ -14,7 +14,6 @@ import com.elecsarthi.enums.FieldUsage;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ConflictException;
-import com.elecsarthi.exception.common.ResourceNotFoundException;
 import com.elecsarthi.exception.errorcode.ErrorCode;
 import com.elecsarthi.mapper.DatasetMapper;
 import com.elecsarthi.repository.DatasetRepository;
@@ -98,8 +97,6 @@ public class DatasetImportServiceImpl implements DatasetImportService {
         if (originalFilename == null || !originalFilename.toLowerCase(Locale.ROOT).endsWith(".xlsx")) {
             throw new BadRequestException("Only .xlsx Excel files are supported.");
         }
-        electionTypeRepository.findByCode(request.getElectionTypeCode())
-                .orElseThrow(() -> new ResourceNotFoundException("Election type not found: " + request.getElectionTypeCode()));
         Dataset superseded = loadSupersedable(request.getSupersedesDatasetId());
 
         Path tempFile = null;

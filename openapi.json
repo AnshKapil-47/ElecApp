@@ -3951,15 +3951,11 @@
         "type": "object",
         "required": [
           "name",
-          "electionTypeCode",
           "storageTier"
         ],
         "properties": {
           "name": {
             "type": "string"
-          },
-          "electionTypeCode": {
-            "$ref": "#/components/schemas/ElectionTypeCode"
           },
           "storageTier": {
             "$ref": "#/components/schemas/DatasetTier"

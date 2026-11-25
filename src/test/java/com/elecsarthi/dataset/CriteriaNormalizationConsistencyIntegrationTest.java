@@ -164,7 +164,7 @@ class CriteriaNormalizationConsistencyIntegrationTest {
         }
         DatasetDetailResponse imported = datasetImportService.importDataset(
                 new MockMultipartFile("file", "norm.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", workbook),
-                DatasetUploadRequest.builder().name("Norm").electionTypeCode(ElectionTypeCode.VIDHAN_SABHA).storageTier(DatasetTier.MASTER).build(),
+                DatasetUploadRequest.builder().name("Norm").storageTier(DatasetTier.MASTER).build(),
                 owner.getId());
 
         assertEquals("QUÉBEC NORTH", jdbcTemplate.queryForObject(

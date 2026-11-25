@@ -178,6 +178,7 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
 - `GET /api/v1/election-types/{code}/fields`: List field definitions with usages (`FILTER`, `DISPLAY`), slip status, orders.
 - `GET /api/v1/election-types/{code}/cascading-filter`: Dynamic cascading dropdown options from IMPORTED datasets.
 - `POST /api/v1/datasets/upload`: Upload `.xlsx` voter dataset (OWNER, SUBOWNER).
+  - Metadata part: `name`, `storageTier` (+ optional `supersedesDatasetId`, `criteria`). Datasets are election-type agnostic; the type is chosen at sale time. A legacy `electionTypeCode` property is ignored.
   - POI SAX streaming reader (`XSSFReader` + `XSSFSheetXMLHandler`).
   - Dynamic partition creation `voter_d<id>` and indexes.
   - Overlap probe rejection on `source_record_key_hash`.

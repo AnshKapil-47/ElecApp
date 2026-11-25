@@ -1,9 +1,9 @@
 # PowerShell test runner for ElecSarthi schema tests
-# Usage: .\tools\db\run_tests.ps1 [-Host 127.0.0.1] [-Port 5498] [-User postgres] [-Db es_test]
+# Usage: .\tools\db\run_tests.ps1 [-Host 127.0.0.1] [-Port 5321] [-User postgres] [-Db es_test]
 
 param(
     [string]$PgHost = "127.0.0.1",
-    [int]$PgPort = 5498,
+    [int]$PgPort = 5321,
     [string]$PgUser = "postgres",
     [string]$TestDb = "es_test",
     [string]$PsqlPath = "C:\Program Files\PostgreSQL\18\bin\psql.exe"
