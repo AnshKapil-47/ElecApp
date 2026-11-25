@@ -3,6 +3,7 @@ package com.elecsarthi.controller;
 import com.elecsarthi.dto.response.CascadingFilterOptionResponse;
 import com.elecsarthi.dto.response.ElectionTypeFieldResponse;
 import com.elecsarthi.dto.response.ElectionTypeResponse;
+import com.elecsarthi.enums.DatasetTier;
 import com.elecsarthi.service.ElectionTypeService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -49,15 +50,18 @@ public class ElectionTypeController {
 
     @GetMapping("/{codeOrId}/filters")
     @PreAuthorize("hasAnyRole('OWNER', 'SUBOWNER', 'AGENT')")
-    @Operation(summary = "Query available distinct values for cascading sale-form filters (Owner, Subowner, Agent only)")
+    @Operation(summary = "Query available distinct values for cascading sale-form filters (Owner, Subowner, Agent only)",
+            description = "Values come only from IMPORTED data of the given storage tier that is usable through the given election type")
     public ResponseEntity<CascadingFilterOptionResponse> getFilterValues(
             @PathVariable String codeOrId,
+            @RequestParam("tier") DatasetTier tier,
             @RequestParam("target") String targetField,
             @RequestParam Map<String, String> allParams) {
 
         // Remove non-filter query parameters
         allParams.remove("target");
+        allParams.remove("tier");
 
-        return ResponseEntity.ok(electionTypeService.getCascadingFilterOptions(codeOrId, targetField, allParams));
+        return ResponseEntity.ok(electionTypeService.getCascadingFilterOptions(codeOrId, tier, targetField, allParams));
     }
 }

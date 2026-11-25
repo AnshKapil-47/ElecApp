@@ -84,8 +84,8 @@ class ElectionTypeFilterEndpointSecurityIntegrationTest extends SecurityIntegrat
                 .deleteAfter(now.plus(60, ChronoUnit.DAYS)).importedByUserId(owner.getId()).createdAt(now).build());
         jdbcTemplate.execute("SELECT create_dataset_partitions(" + ds.getId() + ");");
         String sql = "INSERT INTO voter_d" + ds.getId() + " (dataset_id, source_record_key_hash, state, district, ac_no, part_no, "
-                + "booth_no, serial_no, voter_id, v_fname_en, v_lname_en, vr_fname_en, vr_lname_en, house_no, age, sex, "
-                + "municipal_name_nagar_palika_en) VALUES (?, ?, ?, 'PUNE', ?, ?, ?, ?, ?, 'ANSH', 'KAPIL', 'RAM', 'KAPIL', '101', 30, 'M', ?)";
+                + "booth_no, serial_no, voter_id, v_fname_en, v_lname_en, vr_fname_en, vr_lname_en, house_no, age, sex, nagar_palika_ward_no, "
+                + "municipal_name_nagar_palika_en) VALUES (?, ?, ?, 'PUNE', ?, ?, ?, ?, ?, 'ANSH', 'KAPIL', 'RAM', 'KAPIL', '101', 30, 'M', 5, ?)";
         jdbcTemplate.update(sql, ds.getId(), "f1", "MAHARASHTRA", 12, 1, 1, 1, "EPIC-SECRET-1", "PUNE CITY");
         jdbcTemplate.update(sql, ds.getId(), "f2", "MAHARASHTRA", 13, 2, 2, 2, "EPIC-SECRET-2", "PUNE CITY");
         jdbcTemplate.update(sql, ds.getId(), "f3", "GUJARAT", 7, 3, 3, 3, "EPIC-SECRET-3", "SURAT");
@@ -233,6 +233,9 @@ class ElectionTypeFilterEndpointSecurityIntegrationTest extends SecurityIntegrat
 
     private MockHttpServletRequestBuilder request(String token, String path, String... keyValues) {
         MockHttpServletRequestBuilder b = get(path).header("Authorization", "Bearer " + token);
+        if (!java.util.Arrays.asList(keyValues).contains("tier")) {
+            b.param("tier", "MASTER"); // the sale flow picks the tier first; every filter request carries it
+        }
         for (int i = 0; i < keyValues.length; i += 2) {
             b.param(keyValues[i], keyValues[i + 1]);
         }

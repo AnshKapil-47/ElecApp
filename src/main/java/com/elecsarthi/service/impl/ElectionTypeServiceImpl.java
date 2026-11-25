@@ -6,6 +6,7 @@ import com.elecsarthi.dto.response.ElectionTypeFieldResponse;
 import com.elecsarthi.dto.response.ElectionTypeResponse;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.ElectionTypeField;
+import com.elecsarthi.enums.DatasetTier;
 import com.elecsarthi.enums.ElectionTypeCode;
 import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.exception.common.ResourceNotFoundException;
@@ -72,7 +73,7 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
     }
 
     @Override
-    public CascadingFilterOptionResponse getCascadingFilterOptions(String codeOrId, String targetField, Map<String, String> parentFilters) {
+    public CascadingFilterOptionResponse getCascadingFilterOptions(String codeOrId, DatasetTier tier, String targetField, Map<String, String> parentFilters) {
         ElectionType electionType = resolveElectionType(codeOrId);
 
         // Every column (target and all narrowing filters) is validated against trusted metadata BEFORE any
@@ -103,10 +104,19 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
             }
         }
 
+        // Only IMPORTED data of the requested tier, and only voter rows that can be sold through this election type:
+        // a sale line names every FILTER column of the type (col = ?), so a row with any of them empty can never be
+        // resolved by it. This keeps one election type's areas out of another's dropdowns (the dataset table has no
+        // election type of its own). Column names come from metadata; the tier is a bind parameter.
         StringBuilder sql = new StringBuilder("SELECT DISTINCT ")
                 .append(safeTargetColumn)
-                .append(" FROM voter WHERE dataset_id IN (SELECT id FROM dataset WHERE status = 'IMPORTED')");
+                .append(" FROM voter WHERE dataset_id IN (SELECT id FROM dataset WHERE status = 'IMPORTED' AND storage_tier = ?)");
         List<Object> params = new ArrayList<>();
+        params.add(tier.name());
+        for (ElectionTypeField filterField : fieldRepository.findByElectionTypeIdAndUsageOrderByFilterOrderAsc(
+                electionType.getId(), FieldUsage.FILTER)) {
+            sql.append(" AND ").append(requireAllowedColumn(allowed, filterField.getSourceColumn())).append(" IS NOT NULL");
+        }
         for (Narrowing n : narrowings) {
             sql.append(" AND ").append(n.column()).append(" = ?");
             params.add(n.value());

@@ -124,7 +124,7 @@ public class CustomerServiceImpl implements CustomerService {
         userRepository.save(customerUser);
 
         auditService.logDetails(callerUserId, customer.getId(), null, null, "CUSTOMER_PROVISION", AuditOutcome.SUCCESS,
-                "customer_account", customer.getId().toString(), AuditService.details("phone", phone), null);
+                "customer_account", customer.getId().toString(), AuditService.details("createdByRole", callerRole, "owningAgentUserId", owningAgentUserId), null);
 
         return CustomerProvisionResponse.builder()
                 .id(customer.getId())

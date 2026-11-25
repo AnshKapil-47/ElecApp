@@ -108,7 +108,12 @@ public class DeviceServiceImpl implements DeviceService {
 
         // Clean up any stale PENDING registration for this user
         Optional<UserDevice> pendingOpt = deviceRepository.findByUserIdAndStatus(userId, DeviceStatus.PENDING);
-        pendingOpt.ifPresent(deviceRepository::delete);
+        // Flush the delete before the new PENDING row is inserted: Hibernate would otherwise run the insert first and
+        // violate ux_device_pending_per_user, so a user whose registration was abandoned could never register again.
+        pendingOpt.ifPresent(stale -> {
+            deviceRepository.delete(stale);
+            deviceRepository.flush();
+        });
 
         // Generate 32-byte challenge
         byte[] challengeBytes = new byte[32];

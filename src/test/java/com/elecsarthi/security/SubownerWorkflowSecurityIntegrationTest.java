@@ -391,7 +391,7 @@ class SubownerWorkflowSecurityIntegrationTest extends SecurityIntegrationTestSup
         mockMvc.perform(authed(get("/api/v1/datasets/" + id), agentToken)).andExpect(status().isForbidden());
         mockMvc.perform(authed(delete("/api/v1/datasets/" + id), agentToken)).andExpect(status().isForbidden());
 
-        String body = mockMvc.perform(authed(get("/api/v1/election-types/PANCHAYAT/filters").param("target", "state"), agentToken))
+        String body = mockMvc.perform(authed(get("/api/v1/election-types/PANCHAYAT/filters").param("tier", "MASTER").param("target", "state"), agentToken))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         assertEquals("{\"targetField\":\"state\",\"values\":[\"INV STATE\"]}", body);
         assertFalse(body.contains("INVENTORY_DS") || body.contains("inv.xlsx") || body.contains("\"id\""));
