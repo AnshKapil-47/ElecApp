@@ -1,6 +1,5 @@
 package com.elecsarthi.service.impl;
 
-import java.util.Locale;
 import java.time.Clock;
 import com.elecsarthi.dto.request.CreateBoothAssignmentRequest;
 import com.elecsarthi.dto.request.CreateSubuserRequest;
@@ -26,10 +25,9 @@ import com.elecsarthi.repository.AppUserRepository;
 import com.elecsarthi.repository.BoothAssignmentRepository;
 import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.SubuserService;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -43,7 +41,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -58,7 +55,7 @@ public class SubuserServiceImpl implements SubuserService {
     private final PasswordEncoder passwordEncoder;
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final VoterScopeAuthorizer voterScopeAuthorizer;
     private final Clock clock;
 
     @Override
@@ -146,16 +143,16 @@ public class SubuserServiceImpl implements SubuserService {
         ElectionType electionType = electionTypeRepository.requireById(ent.getElectionTypeId());
         String boothColumn = electionType.getBoothColumn();
 
-        StringBuilder checkSql = new StringBuilder("SELECT 1 FROM voter v WHERE v.dataset_id = ? AND v.")
-                .append(boothColumn).append(" = ? ");
-        List<Object> checkParams = new ArrayList<>();
-        checkParams.add(ent.getDatasetId());
+        // Same fail-closed scope as every voter read: dataset + whitelisted FILTER criteria. Throws 403 when
+        // the criteria are missing, malformed, empty or use a non-whitelisted column.
+        VoterScopeAuthorizer.VoterScope scope = voterScopeAuthorizer.buildVoterScope(
+                ent, electionType, customerUserId, Role.CUSTOMER, "v");
+        List<Object> checkParams = new ArrayList<>(scope.params());
         checkParams.add(request.getBoothValue());
+        String checkSql = "SELECT 1 FROM voter v WHERE " + scope.whereClause()
+                + " AND v." + boothColumn + " = ? LIMIT 1";
 
-        applyEntitlementCriteria(checkSql, checkParams, ent.getCriteria());
-        checkSql.append(" LIMIT 1");
-
-        List<Integer> matches = jdbcTemplate.query(checkSql.toString(), (rs, rowNum) -> rs.getInt(1), checkParams.toArray());
+        List<Integer> matches = jdbcTemplate.query(checkSql,(rs, rowNum) -> rs.getInt(1), checkParams.toArray());
         if (matches.isEmpty()) {
             throw new BadRequestException("Booth " + request.getBoothValue() + " does not exist within the area of this entitlement");
         }
@@ -310,18 +307,5 @@ public class SubuserServiceImpl implements SubuserService {
                 .assignedByUserId(ba.getAssignedByUserId())
                 .createdAt(ba.getCreatedAt())
                 .build();
-    }
-
-    private void applyEntitlementCriteria(StringBuilder whereClause, List<Object> params, String criteriaJson) {
-        try {
-            Map<String, Object> criteria = objectMapper.readValue(criteriaJson, new TypeReference<Map<String, Object>>() {});
-            for (Map.Entry<String, Object> entry : criteria.entrySet()) {
-                String col = entry.getKey().trim().toLowerCase(Locale.ROOT);
-                whereClause.append(" AND v.").append(col).append(" = ? ");
-                params.add(entry.getValue());
-            }
-        } catch (Exception e) {
-            log.error("Failed to parse entitlement criteria JSON", e);
-        }
     }
 }

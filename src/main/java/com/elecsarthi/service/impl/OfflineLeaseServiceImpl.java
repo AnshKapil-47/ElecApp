@@ -34,6 +34,7 @@ import com.elecsarthi.repository.OfflineLeaseRepository;
 import com.elecsarthi.repository.UserDeviceRepository;
 import com.elecsarthi.security.device.CryptoUtils;
 import com.elecsarthi.security.signing.OfflineLeaseSigner;
+import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
 import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.OfflineLeaseService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +48,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -75,6 +78,7 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
     private final AppProperties appProperties;
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
+    private final VoterScopeAuthorizer voterScopeAuthorizer;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Clock clock;
 
@@ -248,9 +252,14 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
         int totalAccepted = 0;
         int totalRejected = 0;
 
+        // Full entitlement scope (dataset + FILTER criteria + the Subuser's booths), the same predicate every
+        // online voter path uses. Booth numbers repeat across ACs, so booth alone is not an area check.
+        VoterScopeAuthorizer.VoterScope scope = voterScopeAuthorizer.buildVoterScope(
+                ent, electionType, subuserId, Role.SUBUSER, "v");
+
         String insertSql = "INSERT INTO voter_turnout (dataset_id, customer_account_id, voter_row_id, marked_by_user_id, marked_at, source) " +
                 "SELECT ?, ?, v.id, ?, ?, 'OFFLINE_LEASE' " +
-                "FROM voter v WHERE v.id = ? AND v.dataset_id = ? AND v." + boothColumn + " = ? " +
+                "FROM voter v WHERE v.id = ? AND " + scope.whereClause() + " AND v." + boothColumn + " = ? " +
                 "ON CONFLICT (dataset_id, customer_account_id, voter_row_id) DO NOTHING";
 
         for (OfflineTurnoutMarkDto mark : request.getMarks()) {
@@ -264,14 +273,15 @@ public class OfflineLeaseServiceImpl implements OfflineLeaseService {
                 continue;
             }
 
-            int rows = jdbcTemplate.update(insertSql,
-                    ent.getDatasetId(),
-                    assignment.getCustomerAccountId(),
-                    subuserId,
-                    Timestamp.from(mark.getOfflineMarkedAt()),
-                    mark.getVoterRowId(),
-                    ent.getDatasetId(),
-                    assignment.getBoothValue());
+            List<Object> args = new ArrayList<>();
+            args.add(ent.getDatasetId());
+            args.add(assignment.getCustomerAccountId());
+            args.add(subuserId);
+            args.add(Timestamp.from(mark.getOfflineMarkedAt()));
+            args.add(mark.getVoterRowId());
+            args.addAll(scope.params());
+            args.add(assignment.getBoothValue());
+            int rows = jdbcTemplate.update(insertSql, args.toArray());
             if (rows > 0) {
                 totalAccepted++;
             } else {
