@@ -1,0 +1,6061 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ElecSarthi Backend REST API",
+    "version": "1.0.0",
+    "description": "Complete OpenAPI 3.0.3 specification audited directly against the ElecSarthi Spring Boot 4.2.0 backend.\n\n### Roles & Client Channel Isolation\n- **Web Console (`clientType: WEB`):** `OWNER`, `SUBOWNER` (max 3 concurrent web sessions, 30 min sliding idle, 12 h absolute).\n- **Mobile App (`clientType: MOBILE`):** `AGENT`, `CUSTOMER`, `SUBUSER` (device-bound ECDSA P-256, max 1 concurrent session per user, 90 d absolute, 30 d refresh).\n\n### Mobile Device Signature Protocol\nAll authenticated `MOBILE` calls to `/api/v1/voters/**`, `/api/v1/turnout/**`, `/api/v1/sync/**`, `/api/v1/leases/**` (plus `POST /api/v1/auth/refresh`, and any request carrying `X-Device-Signature`) require ECDSA P-256 (`SHA256withECDSA`) headers.\nCanonical signing payload (7 newline-separated lines):\n`METHOD\\nURI_PATH\\nSHA256_HEX(rawBodyBytes)\\nTIMESTAMP_EPOCH_MS\\nNONCE\\nCOUNTER\\nCONTEXT_ID`\n- For `POST /api/v1/auth/refresh`, `SHA256_HEX(rawBodyBytes)` is replaced with `SHA256_HEX(refreshToken)`.\n- Omit query string from `URI_PATH`. `CONTEXT_ID` is `X-Device-Context-Id` or empty string `\"\"`.\n\n### Frontend Audit Notes\n- Standard errors use `ErrorResponse` (`{ code, message, timestamp }`); `DeviceSignatureFilter` 401 errors currently emit `{ errorCode, message }`.\n- Unauthenticated requests to protected routes currently return HTTP `403` (empty body) because no custom `AuthenticationEntryPoint` is configured.\n- `POST /api/v1/auth/logout` should only be called with a valid token (calling without auth currently triggers NPE 500).\n- `SyncChunkResponse.isLastChunk` serializes in JSON as `lastChunk`.",
+    "contact": {
+      "name": "ElecSarthi Engineering"
+    },
+    "license": {
+      "name": "Proprietary - Commercial License"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Local Development Server (dev profile)"
+    },
+    {
+      "url": "https://api.elecsarthi.com",
+      "description": "Production API Gateway (NGINX TLS)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Authentication",
+      "description": "Login, mobile refresh token rotation, logout, and customer activation"
+    },
+    {
+      "name": "Devices",
+      "description": "ECDSA P-256 device registration, challenge verification, and revocation"
+    },
+    {
+      "name": "Users",
+      "description": "Platform user management (Owner, Subowner, Agent accounts & sessions)"
+    },
+    {
+      "name": "Customers",
+      "description": "Customer account provisioning, activation code reissue, suspension, agent reassignment"
+    },
+    {
+      "name": "Datasets",
+      "description": "Voter roll XLSX upload, listing, details, and safe deletion (Owner & Subowner)"
+    },
+    {
+      "name": "Election Types",
+      "description": "8 election types, metadata fields, and cascading sale-form filter values"
+    },
+    {
+      "name": "Sales",
+      "description": "Agent quantity-only sales, idempotency, and Owner void operations"
+    },
+    {
+      "name": "Entitlements",
+      "description": "Direct entitlements, mobile access toggles, revocation, and customer queries"
+    },
+    {
+      "name": "Reports",
+      "description": "Quantity-only sales analytics (Owner & Agent; zero monetary values)"
+    },
+    {
+      "name": "Voters",
+      "description": "Scoped voter search, details, family clustering, slips, and global mobile config"
+    },
+    {
+      "name": "Turnout",
+      "description": "Voter turnout marking, unmarking, reset, and booth/gender statistics"
+    },
+    {
+      "name": "Subusers",
+      "description": "Customer field worker provisioning and booth assignments (max 2 slots, max 7 days)"
+    },
+    {
+      "name": "Bulk Sync",
+      "description": "Customer-only chunked offline voter sync sessions"
+    },
+    {
+      "name": "Offline Leases",
+      "description": "Subuser Ed25519-signed offline booth leases and turnout writeback"
+    },
+    {
+      "name": "Health",
+      "description": "Spring Boot Actuator health probe"
+    }
+  ],
+  "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "User login (Web or Mobile)",
+        "description": "Authenticates user credentials and enforces channel separation (`WEB` -> `OWNER`/`SUBOWNER`, `MOBILE` -> `AGENT`/`CUSTOMER`/`SUBUSER`). If a mobile user has no `ACTIVE` device, returns `deviceRegistrationRequired: true` with a single-use `registrationToken` (5 min TTL) instead of access/refresh tokens. If an `ACTIVE` device already exists and `installationId` does not match, returns 403 `DEVICE_CHANGE_NOT_ALLOWED`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated or device registration required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Rotate mobile refresh token",
+        "description": "Exchanges a mobile refresh token (`sessionId.generation.secret`) for a new access token and rotated refresh token. All 5 device proof headers are mandatory; signature signs `SHA256_HEX(refreshToken)` instead of the JSON body. Reusing an older refresh token immediately terminates the session (`REFRESH_TOKEN_REUSE`).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tokens rotated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenRefreshResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Logout active session",
+        "description": "Terminates the caller's active session (`USER_LOGOUT`). Requires a valid `ACCESS` bearer token.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/activate": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Activate Customer primary account",
+        "description": "Activates a `PENDING` Customer account using their E.164 phone number, 10-character Crockford Base32 activation code, and new password (min 8 chars). Returns a single-use `registrationToken` to register the Customer's mobile device. Max 5 attempts (`ACTIVATION_MAX_ATTEMPTS_EXCEEDED`), 72-hour code TTL (`ACTIVATION_CODE_EXPIRED`).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerActivateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Account activated; registration token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerActivateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        }
+      }
+    },
+    "/api/v1/devices/register": {
+      "post": {
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Initiate ECDSA P-256 device registration",
+        "description": "Allowed roles: `AGENT`, `CUSTOMER`, `SUBUSER`. Accepts either a single-use `REGISTRATION` token or an `ACCESS` token. Rejects with 403 `DEVICE_CHANGE_NOT_ALLOWED` if an `ACTIVE` device already exists. Returns `deviceId` and 64-hex `challenge` valid for 2 minutes.",
+        "security": [
+          {
+            "registrationBearerAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceRegisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Challenge issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRegisterResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/devices/verify": {
+      "post": {
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Verify device registration challenge",
+        "description": "Allowed roles: `AGENT`, `CUSTOMER`, `SUBUSER`. Verifies the Base64 DER `SHA256withECDSA` signature over the UTF-8 `challenge` string, promotes the device to `ACTIVE`, and atomically invalidates the `REGISTRATION` token JTI.",
+        "security": [
+          {
+            "registrationBearerAuth": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceVerifyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device verified and activated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/devices/{deviceId}/revoke": {
+      "post": {
+        "tags": [
+          "Devices"
+        ],
+        "summary": "Revoke an active device",
+        "description": "Revokes a device, terminates its active sessions (`DEVICE_REVOKED`), and cascade-revokes active offline leases. Authorization matrix: `OWNER` (any device), `SUBOWNER` (`AGENT` devices only; 404 otherwise), `AGENT` (own customers & their subusers only; 403 for own device, 404 for other agents' customers), `CUSTOMER` (own organization `SUBUSER` devices only; 403 for own primary device, 404 for other customers).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "deviceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/subowners": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Create Subowner (Owner only)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSubownerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Subowner created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "List Subowners (Owner only)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageParam"
+          },
+          {
+            "$ref": "#/components/parameters/SizeParam"
+          },
+          {
+            "$ref": "#/components/parameters/SortParam"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated Subowners",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageUserSummaryResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/agents": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Create Agent (Owner or Subowner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Agent created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "List Agents (Owner or Subowner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageParam"
+          },
+          {
+            "$ref": "#/components/parameters/SizeParam"
+          },
+          {
+            "$ref": "#/components/parameters/SortParam"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated Agents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageUserSummaryResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/users/{id}": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Get user details",
+        "description": "Allowed roles: `OWNER` (any user), `SUBOWNER` (`AGENT` accounts and own profile only; other accounts return 404).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDetailResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/users/{id}/status": {
+      "patch": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Update user status",
+        "description": "Allowed roles: `OWNER` (any user), `SUBOWNER` (`AGENT` accounts only). Suspending a user immediately terminates their sessions.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserStatusUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Status updated"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/users/{id}/reset-password": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Reset user password",
+        "description": "Allowed roles: `OWNER` (any user), `SUBOWNER` (`AGENT` accounts only). Sets `mustChangePassword=true` and terminates existing active sessions.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Password reset and sessions terminated"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/users/{id}/terminate-sessions": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Terminate all active sessions for a user",
+        "description": "Allowed roles: `OWNER` (any user), `SUBOWNER` (`AGENT` accounts only).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "ADMIN_TERMINATED"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Active sessions terminated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/customers": {
+      "post": {
+        "tags": [
+          "Customers"
+        ],
+        "summary": "Provision Customer account",
+        "description": "Allowed roles: `OWNER`, `SUBOWNER`, `AGENT`. Creates `customer_account` and `PENDING` `CUSTOMER` login (username = `contactPhone`), and returns a one-time 10-character Crockford Base32 activation code (72h TTL). When called by an `AGENT`, `owningAgentUserId` is forced to the caller.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProvisionCustomerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Customer provisioned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerProvisionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Customers"
+        ],
+        "summary": "List Customers",
+        "description": "Allowed roles: `OWNER` (all, unmasked phones), `SUBOWNER` (all, `contactPhone` masked as `+91*****1234`), `AGENT` (own customers only, unmasked phones).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageParam"
+          },
+          {
+            "$ref": "#/components/parameters/SizeParam"
+          },
+          {
+            "$ref": "#/components/parameters/SortParam"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated customers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageCustomerSummaryResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/customers/{id}": {
+      "get": {
+        "tags": [
+          "Customers"
+        ],
+        "summary": "Get Customer details",
+        "description": "Allowed roles: `OWNER`, `SUBOWNER` (`contactPhone` masked), `AGENT` (own customers only; 404 otherwise), `CUSTOMER` (own account only; 404 otherwise).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerDetailResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/customers/{id}/reissue-activation-code": {
+      "post": {
+        "tags": [
+          "Customers"
+        ],
+        "summary": "Re-issue Customer activation code",
+        "description": "Allowed roles: `OWNER`, `SUBOWNER`, `AGENT` (own customers only). Only valid while `activationStatus == PENDING`. Resets attempt counter to 0.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fresh activation code issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReissueCodeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/customers/{id}/suspend": {
+      "post": {
+        "tags": [
+          "Customers"
+        ],
+        "summary": "Suspend Customer account (Owner or Subowner)",
+        "description": "Suspends the customer account, terminates active sessions for customer & subusers, revokes offline leases, and increments `mobileAccessPolicyVersion`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuspendCustomerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Customer suspended"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/customers/{id}/reactivate": {
+      "post": {
+        "tags": [
+          "Customers"
+        ],
+        "summary": "Reactivate Customer account (Owner or Subowner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Customer reactivated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/customers/{id}/reassign-agent": {
+      "patch": {
+        "tags": [
+          "Customers"
+        ],
+        "summary": "Reassign owning Agent (Owner only)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReassignAgentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Owning agent reassigned"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/datasets/upload": {
+      "post": {
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Upload and ingest .xlsx voter dataset (Owner or Subowner)",
+        "description": "Multipart streaming upload (`max-file-size: 200MB`, `max-request-size: 210MB`). Send `file` as binary `.xlsx` and `metadata` as an `application/json` part matching `DatasetUploadRequest`. Note: `importedByUsername` may be `null` in the 201 upload response and populated on `GET /api/v1/datasets/{id}`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file",
+                  "metadata"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Excel .xlsx workbook"
+                  },
+                  "metadata": {
+                    "$ref": "#/components/schemas/DatasetUploadRequest"
+                  }
+                }
+              },
+              "encoding": {
+                "metadata": {
+                  "contentType": "application/json"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Dataset imported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/api/v1/datasets": {
+      "get": {
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "List datasets (Owner or Subowner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PageParam"
+          },
+          {
+            "$ref": "#/components/parameters/SizeParam"
+          },
+          {
+            "$ref": "#/components/parameters/SortParam"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated dataset summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageDatasetSummaryResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/datasets/{id}": {
+      "get": {
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Get dataset details and import issues (Owner or Subowner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dataset detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetDetailResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Delete dataset and drop partitions (Owner or Subowner)",
+        "description": "Blocked with 409 `CANNOT_DELETE_DATASET` if active entitlements or unexpired offline leases exist.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Dataset deleted"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/election-types": {
+      "get": {
+        "tags": [
+          "Election Types"
+        ],
+        "summary": "List all active election types",
+        "description": "Accessible to any authenticated user.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of election types with field definitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ElectionTypeResponse"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/election-types/{codeOrId}": {
+      "get": {
+        "tags": [
+          "Election Types"
+        ],
+        "summary": "Get election type by code or ID",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "codeOrId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "VIDHAN_SABHA"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Election type details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElectionTypeResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/election-types/{codeOrId}/fields": {
+      "get": {
+        "tags": [
+          "Election Types"
+        ],
+        "summary": "List configured fields for an election type",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "codeOrId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "VIDHAN_SABHA"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Field metadata list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ElectionTypeFieldResponse"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/election-types/{codeOrId}/filters": {
+      "get": {
+        "tags": [
+          "Election Types"
+        ],
+        "summary": "Query cascading sale-form filter options (Owner, Subowner, Agent)",
+        "description": "Returns distinct values for `target` from `IMPORTED` datasets of the specified `tier` usable by the election type. Pass previously selected cascading parent filter values as additional query parameters (e.g. `?tier=MASTER&target=ac_no&state=RAJASTHAN`).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "codeOrId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "VIDHAN_SABHA"
+          },
+          {
+            "name": "tier",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/DatasetTier"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "state"
+          },
+          {
+            "name": "filters",
+            "in": "query",
+            "required": false,
+            "description": "Optional additional cascading parent filter key/value pairs (e.g. `state=RAJASTHAN&district=JAIPUR`)",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Distinct filter values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CascadingFilterOptionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/sales": {
+      "post": {
+        "tags": [
+          "Sales"
+        ],
+        "summary": "Submit an Agent sale",
+        "description": "Allowed role: `AGENT` only. Sells time-limited area access to the Agent's own active Customer. Supports idempotent replay via `idempotencyKey` (409 if reused with modified payload). Resolves dataset internally (`AREA_UNAVAILABLE`, `AREA_MULTIPLE_DATASETS`, `AMBIGUOUS_AREA` guards). Never exposes `datasetId`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSaleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Sale completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/sales/{id}/void": {
+      "post": {
+        "tags": [
+          "Sales"
+        ],
+        "summary": "Void a sale (Owner only)",
+        "description": "Marks sale `VOIDED`, revokes linked entitlements, revokes active offline leases, bumps customer policy version, and recomputes `LONG_TERM` retention.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VoidSaleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sale voided",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/sales/{id}": {
+      "get": {
+        "tags": [
+          "Sales"
+        ],
+        "summary": "Get sale details (Owner or owning Agent)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sale details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaleResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/sales/my": {
+      "get": {
+        "tags": [
+          "Sales"
+        ],
+        "summary": "List caller Agent's sales (Agent only)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent's sales",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SaleResponse"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/sales/customer/{customerAccountId}": {
+      "get": {
+        "tags": [
+          "Sales"
+        ],
+        "summary": "List sales for a Customer (Owner or owning Agent)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerAccountId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer's sales",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SaleResponse"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/entitlements/direct": {
+      "post": {
+        "tags": [
+          "Entitlements"
+        ],
+        "summary": "Create direct entitlement (Owner or Subowner)",
+        "description": "Creates a `DIRECT` entitlement (`saleLineId: null`). Note: enabling `mobileAccess` on creation or via toggle is governed by Owner rules.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DirectEntitlementRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Direct entitlement created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/entitlements/{id}/mobile-access": {
+      "put": {
+        "tags": [
+          "Entitlements"
+        ],
+        "summary": "Toggle voter mobile access on an entitlement (Owner only)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileAccessRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Entitlement updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/entitlements/{id}/revoke": {
+      "post": {
+        "tags": [
+          "Entitlements"
+        ],
+        "summary": "Revoke an entitlement (Owner or Subowner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeEntitlementRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Entitlement revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/entitlements/my": {
+      "get": {
+        "tags": [
+          "Entitlements"
+        ],
+        "summary": "List logged-in Customer's entitlements (Customer only)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer entitlements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EntitlementResponse"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/entitlements/customer/{customerAccountId}": {
+      "get": {
+        "tags": [
+          "Entitlements"
+        ],
+        "summary": "List entitlements for a Customer",
+        "description": "Allowed roles: `OWNER`, `SUBOWNER`, `AGENT` (own customers only), `CUSTOMER` (own customer account only).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerAccountId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer entitlements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EntitlementResponse"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/entitlements/{id}": {
+      "get": {
+        "tags": [
+          "Entitlements"
+        ],
+        "summary": "Get entitlement by ID",
+        "description": "Allowed roles: `OWNER`, `SUBOWNER`, `AGENT` (own customers only), `CUSTOMER` (own entitlements only).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entitlement details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/reports/sales": {
+      "get": {
+        "tags": [
+          "Reports"
+        ],
+        "summary": "Get quantity-only sales report (Owner or Agent)",
+        "description": "`SUBOWNER` is strictly forbidden (403). `OWNER` sees all sales or filters by `agentId`; `AGENT` sees own sales only. Contains zero pricing/commission fields.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "agentId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Quantity-only sales report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalesReportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/voters/search": {
+      "post": {
+        "tags": [
+          "Voters"
+        ],
+        "summary": "Search voters within active entitlement scope (Customer or Subuser + Device Signature)",
+        "description": "Paginated voter search (`page` defaults to `0`, `limit` defaults to `50`, clamped `[1, 100]`). `sortBy` and `sortDirection` are accepted but ignored (always sorted by booth ASC, serial_no ASC). `SUBUSER` callers are restricted to assigned booths. `mobileNumber` is unmasked only when global toggle is true AND caller is `CUSTOMER` AND `entitlement.mobileAccess` is true.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VoterSearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paginated voter summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageVoterSummaryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/voters/{id}": {
+      "get": {
+        "tags": [
+          "Voters"
+        ],
+        "summary": "Get voter details (Customer or Subuser + Device Signature)",
+        "description": "Projects only columns configured for the entitlement's election type (additional columns returned in `additionalFields`). Out-of-scope voter IDs return 404.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "entitlementId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Voter details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoterDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/voters/{id}/family": {
+      "get": {
+        "tags": [
+          "Voters"
+        ],
+        "summary": "Get family members (Customer or Subuser + Device Signature)",
+        "description": "Returns voters sharing the same booth and non-blank `houseNo` within scope (empty list if `houseNo` is blank).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "entitlementId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Family members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VoterSummaryResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/voters/{id}/slip": {
+      "get": {
+        "tags": [
+          "Voters"
+        ],
+        "summary": "Get voter slip data (Customer or Subuser + Device Signature)",
+        "description": "Formats voter slip header and `slipFields` from `election_type_field` entries where `on_slip = true`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "entitlementId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Voter slip payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoterSlipResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/voters/system/mobile-numbers": {
+      "put": {
+        "tags": [
+          "Voters"
+        ],
+        "summary": "Toggle global voter mobile number visibility (Owner only)",
+        "description": "Persists `GLOBAL_MOBILE_TOGGLE` to `audit_log` and increments `mobile_access_policy_version` on active customers.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemMobileConfigUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated global setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileNumbersConfigResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Voters"
+        ],
+        "summary": "Get global voter mobile visibility setting (Owner or Subowner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current global setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileNumbersConfigResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/turnout/mark": {
+      "post": {
+        "tags": [
+          "Turnout"
+        ],
+        "summary": "Mark voter as voted (Customer or Subuser + Device Signature)",
+        "description": "Idempotent first-mark-wins (`ON CONFLICT DO NOTHING`) returning stored `markedAt` timestamp.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkTurnoutRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turnout marked/confirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnoutResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/turnout/unmark": {
+      "post": {
+        "tags": [
+          "Turnout"
+        ],
+        "summary": "Unmark voter turnout (Customer only + Device Signature)",
+        "description": "`SUBUSER` is strictly forbidden (403).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnmarkTurnoutRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turnout unmarked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/turnout/reset": {
+      "post": {
+        "tags": [
+          "Turnout"
+        ],
+        "summary": "Reset turnout for entitlement or booth (Customer only + Device Signature)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetTurnoutRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turnout reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/turnout/statistics": {
+      "get": {
+        "tags": [
+          "Turnout"
+        ],
+        "summary": "Get turnout statistics (Customer or Subuser + Device Signature)",
+        "description": "Returns overall totals, booth breakdown, and gender breakdown. Subusers are scoped to assigned booths (403 if requesting an unassigned `boothNo`).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entitlementId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "boothNo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Turnout statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnoutStatisticsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/subusers": {
+      "post": {
+        "tags": [
+          "Subusers"
+        ],
+        "summary": "Create Subuser (Customer only)",
+        "description": "Note: `contactPhone` in `CreateSubuserRequest` is accepted in JSON but not persisted.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSubuserRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Subuser created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubuserDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Subusers"
+        ],
+        "summary": "List Subusers (Customer or Owner support)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "customerAccountId",
+            "in": "query",
+            "required": false,
+            "description": "Used only when caller is `OWNER` to inspect a specific Customer's subusers",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of subusers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SubuserDetailResponse"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/subusers/{id}": {
+      "get": {
+        "tags": [
+          "Subusers"
+        ],
+        "summary": "Get Subuser details (Customer or Owner)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subuser details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubuserDetailResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/subusers/{id}/booth-assignments": {
+      "post": {
+        "tags": [
+          "Subusers"
+        ],
+        "summary": "Assign booth to Subuser (Customer only)",
+        "description": "Assigns booth to slot `1` or `2` (max 2 active slots, max `durationDays` = 7, bounded by entitlement expiration).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBoothAssignmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Booth assigned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoothAssignmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/subusers/booth-assignments/{id}/revoke": {
+      "post": {
+        "tags": [
+          "Subusers"
+        ],
+        "summary": "Revoke booth assignment (Customer or Owner)",
+        "description": "Revokes an active booth assignment, freeing the slot and cascade-revoking linked offline leases.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeBoothAssignmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Booth assignment revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoothAssignmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/sync/sessions": {
+      "post": {
+        "tags": [
+          "Bulk Sync"
+        ],
+        "summary": "Start offline bulk sync session (Customer only + Device Signature)",
+        "description": "`SUBUSER` is strictly forbidden (403). `protocolVersion` is optional (defaults to `1`).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartSyncSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Sync session started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/sync/sessions/{sessionId}/chunks/{chunkNo}": {
+      "get": {
+        "tags": [
+          "Bulk Sync"
+        ],
+        "summary": "Retrieve sync chunk (Customer only + Device Signature)",
+        "description": "Revalidates user, customer, device, entitlement, and session expiration on every chunk.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "chunkNo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sync chunk payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncChunkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/sync/sessions/{sessionId}/complete": {
+      "post": {
+        "tags": [
+          "Bulk Sync"
+        ],
+        "summary": "Complete sync session (Customer only + Device Signature)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sync session completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/leases/booth": {
+      "post": {
+        "tags": [
+          "Offline Leases"
+        ],
+        "summary": "Request signed offline booth lease (Subuser only + Device Signature)",
+        "description": "Issues an Ed25519-signed lease capped at `min(assignment.validUntil, entitlement.validUntil, now + 24h)`. Contains no voter data.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestOfflineLeaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Signed offline lease issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineLeaseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/leases/writeback": {
+      "post": {
+        "tags": [
+          "Offline Leases"
+        ],
+        "summary": "Submit offline turnout marks (Subuser only + Device Signature)",
+        "description": "Enforces strict interval `issuedAt <= offlineMarkedAt < expiresAt` and active assignment/entitlement/device/customer/subuser checks.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XDeviceIdOptional"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceSignatureRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceTimestampRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceNonceRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceCounterRequired"
+          },
+          {
+            "$ref": "#/components/parameters/XDeviceContextIdOptional"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfflineWritebackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Writeback processed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineWritebackResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/actuator/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Application liveness and readiness check",
+        "responses": {
+          "200": {
+            "description": "Service UP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "UP"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Normal `ACCESS` JWT returned by `POST /api/v1/auth/login` or `POST /api/v1/auth/refresh` (15-minute TTL)."
+      },
+      "registrationBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Single-use `REGISTRATION` JWT (5-minute TTL) strictly scoped to `/api/v1/devices/register` and `/api/v1/devices/verify`."
+      }
+    },
+    "parameters": {
+      "XDeviceIdRequired": {
+        "name": "X-Device-Id",
+        "in": "header",
+        "required": true,
+        "description": "Registered device UUID bound to the active mobile session.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "XDeviceIdOptional": {
+        "name": "X-Device-Id",
+        "in": "header",
+        "required": false,
+        "description": "Registered device UUID; if provided, must match the authenticated session's deviceId.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "XDeviceSignatureRequired": {
+        "name": "X-Device-Signature",
+        "in": "header",
+        "required": true,
+        "description": "Base64-encoded DER `SHA256withECDSA` signature over the canonical 7-line request payload.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "XDeviceTimestampRequired": {
+        "name": "X-Device-Timestamp",
+        "in": "header",
+        "required": true,
+        "description": "Unix epoch timestamp in milliseconds (validated within +/- 5 minutes of server time).",
+        "schema": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "XDeviceNonceRequired": {
+        "name": "X-Device-Nonce",
+        "in": "header",
+        "required": true,
+        "description": "Unique single-use nonce per device (stored 10 minutes to prevent replay).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "XDeviceCounterRequired": {
+        "name": "X-Device-Counter",
+        "in": "header",
+        "required": true,
+        "description": "Strictly increasing monotonic integer counter (> `lastRequestCounter` on device).",
+        "schema": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "XDeviceContextIdOptional": {
+        "name": "X-Device-Context-Id",
+        "in": "header",
+        "required": false,
+        "description": "Optional context identifier included as the 7th line of the signed canonical payload.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "PageParam": {
+        "name": "page",
+        "in": "query",
+        "required": false,
+        "description": "Zero-based page index (default `0`).",
+        "schema": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "SizeParam": {
+        "name": "size",
+        "in": "query",
+        "required": false,
+        "description": "Page size (default `20`).",
+        "schema": {
+          "type": "integer",
+          "format": "int32",
+          "default": 20,
+          "minimum": 1
+        }
+      },
+      "SortParam": {
+        "name": "sort",
+        "in": "query",
+        "required": false,
+        "description": "Sorting criteria in `property,(asc|desc)` format (e.g. `createdAt,desc`).",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Validation or malformed request error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Invalid credentials, expired/reused refresh token, or invalid device signature (`ErrorResponse` or `DeviceFilterErrorResponse`)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/DeviceFilterErrorResponse"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Role/tenant permission denied (or missing/expired bearer token on protected routes)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found or concealed out-of-scope tenant resource",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Duplicate record, overlap constraint, session limit, or active entitlement delete guard",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "Multipart upload exceeded 200MB file / 210MB request limit",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "Rate limit exceeded",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Role": {
+        "type": "string",
+        "enum": [
+          "OWNER",
+          "SUBOWNER",
+          "AGENT",
+          "CUSTOMER",
+          "SUBUSER"
+        ]
+      },
+      "ClientType": {
+        "type": "string",
+        "enum": [
+          "WEB",
+          "MOBILE"
+        ]
+      },
+      "UserStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "ACTIVE",
+          "SUSPENDED",
+          "DEACTIVATED"
+        ]
+      },
+      "ActivationStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "ACTIVATED"
+        ]
+      },
+      "DevicePlatform": {
+        "type": "string",
+        "enum": [
+          "ANDROID",
+          "IOS"
+        ]
+      },
+      "DeviceStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "ACTIVE",
+          "REVOKED",
+          "REPLACED"
+        ]
+      },
+      "DatasetTier": {
+        "type": "string",
+        "enum": [
+          "MASTER",
+          "LONG_TERM"
+        ]
+      },
+      "DatasetStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "IMPORTED",
+          "FAILED",
+          "SUPERSEDED",
+          "DELETING"
+        ]
+      },
+      "ElectionTypeCode": {
+        "type": "string",
+        "enum": [
+          "LOK_SABHA",
+          "VIDHAN_SABHA",
+          "NAGAR_NIGAM",
+          "NAGAR_PALIKA",
+          "NAGAR_PARISHAD",
+          "ZILLA_PANCHAYAT",
+          "PANCHAYAT_SAMITI",
+          "PANCHAYAT"
+        ]
+      },
+      "FieldValueType": {
+        "type": "string",
+        "enum": [
+          "TEXT",
+          "INT"
+        ]
+      },
+      "FieldUsage": {
+        "type": "string",
+        "enum": [
+          "FILTER",
+          "DISPLAY"
+        ]
+      },
+      "DurationUnit": {
+        "type": "string",
+        "enum": [
+          "DAY",
+          "WEEK",
+          "MONTH"
+        ]
+      },
+      "SaleStatus": {
+        "type": "string",
+        "enum": [
+          "COMPLETED",
+          "VOIDED"
+        ]
+      },
+      "EntitlementSource": {
+        "type": "string",
+        "enum": [
+          "SALE",
+          "DIRECT"
+        ]
+      },
+      "EntitlementStatus": {
+        "type": "string",
+        "enum": [
+          "ACTIVE",
+          "REVOKED"
+        ]
+      },
+      "BoothAssignmentStatus": {
+        "type": "string",
+        "enum": [
+          "ACTIVE",
+          "REVOKED"
+        ]
+      },
+      "TurnoutSource": {
+        "type": "string",
+        "enum": [
+          "ONLINE",
+          "OFFLINE_LEASE",
+          "OFFLINE_SYNC"
+        ]
+      },
+      "SyncStatus": {
+        "type": "string",
+        "enum": [
+          "ACTIVE",
+          "COMPLETED",
+          "CANCELLED",
+          "EXPIRED"
+        ]
+      },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "RESOURCE_NOT_FOUND",
+          "UNAUTHORIZED",
+          "FORBIDDEN",
+          "ACCESS_DENIED",
+          "CONFLICT",
+          "BAD_REQUEST",
+          "VALIDATION_FAILED",
+          "AMBIGUOUS_AREA",
+          "AREA_UNAVAILABLE",
+          "AREA_MULTIPLE_DATASETS",
+          "ACCOUNT_SUSPENDED",
+          "ACCOUNT_PENDING_ACTIVATION",
+          "ACTIVATION_CODE_EXPIRED",
+          "ACTIVATION_MAX_ATTEMPTS_EXCEEDED",
+          "SESSION_TERMINATED",
+          "SESSION_LIMIT_EXCEEDED",
+          "REFRESH_TOKEN_REUSE",
+          "DEVICE_CHANGE_NOT_ALLOWED",
+          "DEVICE_PENDING_VERIFICATION",
+          "DEVICE_REVOKED",
+          "INVALID_DEVICE_SIGNATURE",
+          "REPLAYED_NONCE",
+          "EXPIRED_LEASE",
+          "SYNC_SESSION_INVALID",
+          "SUBUSER_BOOTH_LIMIT_EXCEEDED",
+          "SUBUSER_BOOTH_EXPIRED",
+          "FILE_ALREADY_EXISTS",
+          "DATASET_OVERLAP",
+          "CANNOT_DELETE_DATASET",
+          "INTERNAL_SERVER_ERROR"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "timestamp"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "DeviceFilterErrorResponse": {
+        "type": "object",
+        "description": "Error shape emitted directly by `DeviceSignatureFilter` on HTTP 401.",
+        "required": [
+          "errorCode",
+          "message"
+        ],
+        "properties": {
+          "errorCode": {
+            "type": "string",
+            "example": "INVALID_DEVICE_SIGNATURE"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "StatusResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "MobileNumbersConfigResponse": {
+        "type": "object",
+        "required": [
+          "mobileNumbersEnabled"
+        ],
+        "properties": {
+          "mobileNumbersEnabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "identifier",
+          "password",
+          "clientType"
+        ],
+        "properties": {
+          "identifier": {
+            "type": "string",
+            "description": "Username or E.164 phone number"
+          },
+          "password": {
+            "type": "string",
+            "format": "password"
+          },
+          "clientType": {
+            "$ref": "#/components/schemas/ClientType"
+          },
+          "installationId": {
+            "type": "string",
+            "description": "Required when `clientType == MOBILE`"
+          },
+          "deviceSignature": {
+            "type": "string",
+            "description": "Optional device proof signature when replacing session on same device"
+          }
+        }
+      },
+      "RefreshTokenRequest": {
+        "type": "object",
+        "required": [
+          "refreshToken"
+        ],
+        "properties": {
+          "refreshToken": {
+            "type": "string",
+            "description": "Wire format `{sessionId}.{generation}.{secret}`"
+          }
+        }
+      },
+      "CustomerActivateRequest": {
+        "type": "object",
+        "required": [
+          "contactPhone",
+          "activationCode",
+          "password"
+        ],
+        "properties": {
+          "contactPhone": {
+            "type": "string",
+            "pattern": "^\\+[1-9]\\d{1,14}$",
+            "example": "+919876543210"
+          },
+          "activationCode": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 10,
+            "description": "10-character Crockford Base32 activation code"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 8
+          }
+        }
+      },
+      "DeviceRegisterRequest": {
+        "type": "object",
+        "required": [
+          "installationId",
+          "publicKey",
+          "platform"
+        ],
+        "properties": {
+          "installationId": {
+            "type": "string"
+          },
+          "publicKey": {
+            "type": "string",
+            "description": "Base64-encoded X.509 ECDSA P-256 public key"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/DevicePlatform"
+          },
+          "deviceName": {
+            "type": "string"
+          }
+        }
+      },
+      "DeviceVerifyRequest": {
+        "type": "object",
+        "required": [
+          "deviceId",
+          "challengeSignature"
+        ],
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "challengeSignature": {
+            "type": "string",
+            "description": "Base64 DER `SHA256withECDSA` signature over UTF-8 challenge string"
+          }
+        }
+      },
+      "CreateSubownerRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "fullName",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 50
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 8,
+            "description": "Max 72 UTF-8 bytes"
+          }
+        }
+      },
+      "CreateAgentRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "fullName",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 50
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 8,
+            "description": "Max 72 UTF-8 bytes"
+          }
+        }
+      },
+      "UserStatusUpdateRequest": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          }
+        }
+      },
+      "ResetPasswordRequest": {
+        "type": "object",
+        "required": [
+          "newPassword"
+        ],
+        "properties": {
+          "newPassword": {
+            "type": "string",
+            "format": "password",
+            "minLength": 8,
+            "description": "Max 72 UTF-8 bytes"
+          }
+        }
+      },
+      "ProvisionCustomerRequest": {
+        "type": "object",
+        "required": [
+          "customerName",
+          "contactPhone"
+        ],
+        "properties": {
+          "customerName": {
+            "type": "string"
+          },
+          "partyOrOrgName": {
+            "type": "string"
+          },
+          "contactPhone": {
+            "type": "string",
+            "pattern": "^\\+[1-9]\\d{1,14}$",
+            "example": "+919876543210"
+          },
+          "contactEmail": {
+            "type": "string",
+            "format": "email"
+          },
+          "owningAgentUserId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Optional for Owner/Subowner; ignored/overridden when caller is Agent"
+          }
+        }
+      },
+      "SuspendCustomerRequest": {
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "ReassignAgentRequest": {
+        "type": "object",
+        "required": [
+          "owningAgentUserId"
+        ],
+        "properties": {
+          "owningAgentUserId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "DatasetUploadRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "electionTypeCode",
+          "storageTier"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "electionTypeCode": {
+            "$ref": "#/components/schemas/ElectionTypeCode"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "supersedesDatasetId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "criteria": {
+            "type": "object",
+            "additionalProperties": {},
+            "example": {
+              "state": "RAJASTHAN",
+              "ac_no": 12
+            }
+          }
+        }
+      },
+      "SaleLineRequest": {
+        "type": "object",
+        "required": [
+          "criteria",
+          "durationValue",
+          "durationUnit"
+        ],
+        "properties": {
+          "criteria": {
+            "type": "object",
+            "additionalProperties": {},
+            "example": {
+              "state": "RAJASTHAN",
+              "ac_no": 12
+            }
+          },
+          "durationValue": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1
+          },
+          "durationUnit": {
+            "$ref": "#/components/schemas/DurationUnit"
+          }
+        }
+      },
+      "CreateSaleRequest": {
+        "type": "object",
+        "required": [
+          "customerAccountId",
+          "electionTypeId",
+          "storageTier",
+          "idempotencyKey",
+          "lines"
+        ],
+        "properties": {
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "electionTypeId": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/SaleLineRequest"
+            }
+          }
+        }
+      },
+      "VoidSaleRequest": {
+        "type": "object",
+        "required": [
+          "voidReason"
+        ],
+        "properties": {
+          "voidReason": {
+            "type": "string"
+          }
+        }
+      },
+      "DirectEntitlementRequest": {
+        "type": "object",
+        "required": [
+          "customerAccountId",
+          "electionTypeId",
+          "storageTier",
+          "criteria",
+          "durationValue",
+          "durationUnit"
+        ],
+        "properties": {
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "electionTypeId": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "criteria": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "durationValue": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1
+          },
+          "durationUnit": {
+            "$ref": "#/components/schemas/DurationUnit"
+          },
+          "mobileAccess": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "MobileAccessRequest": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RevokeEntitlementRequest": {
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "SystemMobileConfigUpdateRequest": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "VoterSearchRequest": {
+        "type": "object",
+        "required": [
+          "entitlementId"
+        ],
+        "properties": {
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "epic": {
+            "type": "string",
+            "description": "Case-insensitive exact EPIC/voterId match"
+          },
+          "name": {
+            "type": "string",
+            "description": "Partial voter name match (English or local language)"
+          },
+          "booth": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "sectionNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "gender": {
+            "type": "string"
+          },
+          "minAge": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxAge": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "houseNo": {
+            "type": "string"
+          },
+          "voted": {
+            "type": "boolean"
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 100
+          },
+          "sortBy": {
+            "type": "string",
+            "description": "Accepted for compatibility; server currently ignores and sorts by booth/serialNo"
+          },
+          "sortDirection": {
+            "type": "string",
+            "default": "ASC"
+          }
+        }
+      },
+      "MarkTurnoutRequest": {
+        "type": "object",
+        "required": [
+          "entitlementId",
+          "voterRowId"
+        ],
+        "properties": {
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterRowId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "UnmarkTurnoutRequest": {
+        "type": "object",
+        "required": [
+          "entitlementId",
+          "voterRowId"
+        ],
+        "properties": {
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterRowId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ResetTurnoutRequest": {
+        "type": "object",
+        "required": [
+          "entitlementId"
+        ],
+        "properties": {
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "boothNo": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Optional booth filter; resets entire entitlement area if omitted"
+          }
+        }
+      },
+      "CreateSubuserRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "fullName",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 8
+          },
+          "contactPhone": {
+            "type": "string",
+            "description": "Optional; currently accepted in payload but not persisted"
+          }
+        }
+      },
+      "CreateBoothAssignmentRequest": {
+        "type": "object",
+        "required": [
+          "entitlementId",
+          "boothValue",
+          "slot",
+          "durationDays"
+        ],
+        "properties": {
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "boothValue": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slot": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2
+          },
+          "durationDays": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 7
+          }
+        }
+      },
+      "RevokeBoothAssignmentRequest": {
+        "type": "object",
+        "required": [
+          "revokeReason"
+        ],
+        "properties": {
+          "revokeReason": {
+            "type": "string"
+          }
+        }
+      },
+      "StartSyncSessionRequest": {
+        "type": "object",
+        "required": [
+          "entitlementId"
+        ],
+        "properties": {
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "protocolVersion": {
+            "type": "integer",
+            "format": "int32",
+            "default": 1
+          }
+        }
+      },
+      "RequestOfflineLeaseRequest": {
+        "type": "object",
+        "required": [
+          "boothAssignmentId"
+        ],
+        "properties": {
+          "boothAssignmentId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "OfflineTurnoutMarkDto": {
+        "type": "object",
+        "required": [
+          "voterRowId",
+          "offlineMarkedAt"
+        ],
+        "properties": {
+          "voterRowId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "offlineMarkedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Must satisfy `issuedAt <= offlineMarkedAt < expiresAt`"
+          }
+        }
+      },
+      "OfflineWritebackRequest": {
+        "type": "object",
+        "required": [
+          "leaseId",
+          "marks"
+        ],
+        "properties": {
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "marks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/OfflineTurnoutMarkDto"
+            }
+          }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "userId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "clientType": {
+            "$ref": "#/components/schemas/ClientType"
+          },
+          "accessToken": {
+            "type": "string"
+          },
+          "refreshToken": {
+            "type": "string",
+            "description": "Present only for `MOBILE` logins when device is already registered"
+          },
+          "registrationToken": {
+            "type": "string",
+            "description": "Present when `deviceRegistrationRequired == true`"
+          },
+          "deviceRegistrationRequired": {
+            "type": "boolean"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mustChangePassword": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TokenRefreshResponse": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string"
+          },
+          "refreshToken": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CustomerActivateResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "registrationToken": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "DeviceRegisterResponse": {
+        "type": "object",
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "challenge": {
+            "type": "string",
+            "description": "64-hex challenge string to sign with device ECDSA P-256 private key"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UserDetailResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "createdByUserId": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "mustChangePassword": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "activeSessionCount": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "UserSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CustomerProvisionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerName": {
+            "type": "string"
+          },
+          "contactPhone": {
+            "type": "string"
+          },
+          "activationStatus": {
+            "$ref": "#/components/schemas/ActivationStatus"
+          },
+          "activationCode": {
+            "type": "string",
+            "description": "Returned once at provisioning; never stored in plaintext"
+          },
+          "activationCodeExpiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CustomerSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerName": {
+            "type": "string"
+          },
+          "partyOrOrgName": {
+            "type": "string",
+            "nullable": true
+          },
+          "contactPhone": {
+            "type": "string",
+            "description": "Masked (`+91*****1234`) when caller is `SUBOWNER`"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "activationStatus": {
+            "$ref": "#/components/schemas/ActivationStatus"
+          },
+          "owningAgentUserId": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "owningAgentName": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CustomerDetailResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerName": {
+            "type": "string"
+          },
+          "partyOrOrgName": {
+            "type": "string",
+            "nullable": true
+          },
+          "contactPhone": {
+            "type": "string",
+            "description": "Masked when caller is `SUBOWNER`"
+          },
+          "contactEmail": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "activationStatus": {
+            "$ref": "#/components/schemas/ActivationStatus"
+          },
+          "owningAgentUserId": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "owningAgentName": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdByUserId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "activatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "suspendedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "suspensionReason": {
+            "type": "string",
+            "nullable": true
+          },
+          "mobileAccessPolicyVersion": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ReissueCodeResponse": {
+        "type": "object",
+        "properties": {
+          "customerId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "contactPhone": {
+            "type": "string"
+          },
+          "activationCode": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ImportIssueResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sheet": {
+            "type": "string"
+          },
+          "rowNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "columnName": {
+            "type": "string",
+            "nullable": true
+          },
+          "issueCode": {
+            "type": "string"
+          },
+          "issueDetail": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "DatasetSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "originalFileName": {
+            "type": "string"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DatasetStatus"
+          },
+          "totalRows": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "importedRows": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "failedRows": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "deleteAfter": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "DatasetDetailResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "originalFileName": {
+            "type": "string"
+          },
+          "fileSha256": {
+            "type": "string"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DatasetStatus"
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supersedesDatasetId": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "supersededAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "deleteAfter": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "totalRows": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "importedRows": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "failedRows": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "importedByUserId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "importedByUsername": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportIssueResponse"
+            }
+          }
+        }
+      },
+      "ElectionTypeFieldResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sourceColumn": {
+            "type": "string"
+          },
+          "valueType": {
+            "$ref": "#/components/schemas/FieldValueType"
+          },
+          "labelEn": {
+            "type": "string"
+          },
+          "labelMt": {
+            "type": "string",
+            "nullable": true
+          },
+          "usage": {
+            "$ref": "#/components/schemas/FieldUsage"
+          },
+          "filterOrder": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "displayOrder": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "onSlip": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElectionTypeResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ElectionTypeCode"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "boothColumn": {
+            "type": "string"
+          },
+          "guardColumn": {
+            "type": "string",
+            "nullable": true
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElectionTypeFieldResponse"
+            }
+          }
+        }
+      },
+      "CascadingFilterOptionResponse": {
+        "type": "object",
+        "properties": {
+          "targetField": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {}
+          }
+        }
+      },
+      "SaleLineResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lineNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "scopeLabel": {
+            "type": "string"
+          },
+          "criteriaHash": {
+            "type": "string"
+          },
+          "voterCountSnapshot": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "durationValue": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "durationUnit": {
+            "$ref": "#/components/schemas/DurationUnit"
+          },
+          "validFrom": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validUntil": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SaleResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "soldByUserId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "electionTypeId": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "electionTypeCode": {
+            "type": "string"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "soldAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SaleStatus"
+          },
+          "voidedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "voidReason": {
+            "type": "string",
+            "nullable": true
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SaleLineResponse"
+            }
+          }
+        }
+      },
+      "EntitlementResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "electionTypeId": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "electionTypeCode": {
+            "type": "string"
+          },
+          "electionTypeName": {
+            "type": "string"
+          },
+          "storageTier": {
+            "$ref": "#/components/schemas/DatasetTier"
+          },
+          "criteria": {
+            "type": "string",
+            "description": "Canonical JSON string"
+          },
+          "criteriaHash": {
+            "type": "string"
+          },
+          "scopeLabel": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/EntitlementSource"
+          },
+          "saleLineId": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "status": {
+            "$ref": "#/components/schemas/EntitlementStatus"
+          },
+          "validFrom": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validUntil": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "remainingFormatted": {
+            "type": "string"
+          },
+          "mobileAccess": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElectionTypeQuantityResponse": {
+        "type": "object",
+        "properties": {
+          "electionTypeCode": {
+            "type": "string"
+          },
+          "salesCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterCount": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ScopeQuantityResponse": {
+        "type": "object",
+        "properties": {
+          "scopeLabel": {
+            "type": "string"
+          },
+          "criteriaHash": {
+            "type": "string"
+          },
+          "timesSold": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterCount": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SaleRecordResponse": {
+        "type": "object",
+        "properties": {
+          "saleId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "soldAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "agentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerName": {
+            "type": "string"
+          },
+          "electionTypeCode": {
+            "type": "string"
+          },
+          "scopeLabel": {
+            "type": "string"
+          },
+          "voterCount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "duration": {
+            "type": "string"
+          },
+          "validFrom": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validUntil": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SaleStatus"
+          }
+        }
+      },
+      "SalesReportResponse": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "totalSales": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalLines": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalVoters": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalCustomersAcquired": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voidedSalesCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voidedLinesCount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "electionTypeBreakdown": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElectionTypeQuantityResponse"
+            }
+          },
+          "scopeBreakdown": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopeQuantityResponse"
+            }
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SaleRecordResponse"
+            }
+          }
+        }
+      },
+      "VoterSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterId": {
+            "type": "string"
+          },
+          "serialNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "partNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "boothNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "firstNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "firstNameMt": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastNameMt": {
+            "type": "string",
+            "nullable": true
+          },
+          "relationFirstNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "relationLastNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "houseNo": {
+            "type": "string",
+            "nullable": true
+          },
+          "age": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "gender": {
+            "type": "string",
+            "nullable": true
+          },
+          "sectionNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "mobileNumber": {
+            "type": "string",
+            "nullable": true
+          },
+          "voted": {
+            "type": "boolean"
+          },
+          "votedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "VoterDetailResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterId": {
+            "type": "string"
+          },
+          "serialNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "state": {
+            "type": "string",
+            "nullable": true
+          },
+          "district": {
+            "type": "string",
+            "nullable": true
+          },
+          "pcNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "pcNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "acNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "acNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "partNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "boothNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "boothNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "boothAddressEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "firstNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "firstNameMt": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastNameMt": {
+            "type": "string",
+            "nullable": true
+          },
+          "relationFirstNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "relationLastNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "houseNo": {
+            "type": "string",
+            "nullable": true
+          },
+          "sectionNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "sectionNameEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "age": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "gender": {
+            "type": "string",
+            "nullable": true
+          },
+          "mobileNumber": {
+            "type": "string",
+            "nullable": true
+          },
+          "voted": {
+            "type": "boolean"
+          },
+          "votedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "additionalFields": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "Configured election-type-specific columns (e.g. Panchayat/Zilla/Samiti/Ward fields) in display order"
+          }
+        }
+      },
+      "VoterSlipFieldResponse": {
+        "type": "object",
+        "properties": {
+          "sourceColumn": {
+            "type": "string"
+          },
+          "labelEn": {
+            "type": "string"
+          },
+          "labelMt": {
+            "type": "string",
+            "nullable": true
+          },
+          "value": {
+            "nullable": true
+          }
+        }
+      },
+      "VoterSlipResponse": {
+        "type": "object",
+        "properties": {
+          "voterRowId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterId": {
+            "type": "string"
+          },
+          "serialNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "partNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "boothNo": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "fullNameEn": {
+            "type": "string"
+          },
+          "fullNameMt": {
+            "type": "string"
+          },
+          "relationNameEn": {
+            "type": "string"
+          },
+          "houseNo": {
+            "type": "string",
+            "nullable": true
+          },
+          "age": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "gender": {
+            "type": "string",
+            "nullable": true
+          },
+          "pollingStationEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "pollingStationAddressEn": {
+            "type": "string",
+            "nullable": true
+          },
+          "slipFields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VoterSlipFieldResponse"
+            }
+          }
+        }
+      },
+      "TurnoutResponse": {
+        "type": "object",
+        "properties": {
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voterRowId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voted": {
+            "type": "boolean"
+          },
+          "markedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source": {
+            "$ref": "#/components/schemas/TurnoutSource"
+          }
+        }
+      },
+      "BoothTurnoutStat": {
+        "type": "object",
+        "properties": {
+          "boothNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "boothName": {
+            "type": "string"
+          },
+          "totalVoters": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalVoted": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "turnoutPercentage": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "GenderTurnoutStat": {
+        "type": "object",
+        "properties": {
+          "gender": {
+            "type": "string"
+          },
+          "totalVoters": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalVoted": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "turnoutPercentage": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "TurnoutStatisticsResponse": {
+        "type": "object",
+        "properties": {
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scopeLabel": {
+            "type": "string"
+          },
+          "totalVoters": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalVoted": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "turnoutPercentage": {
+            "type": "number",
+            "format": "double"
+          },
+          "boothBreakdown": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BoothTurnoutStat"
+            }
+          },
+          "genderBreakdown": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenderTurnoutStat"
+            }
+          }
+        }
+      },
+      "BoothAssignmentResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "subuserId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "boothValue": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slot": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BoothAssignmentStatus"
+          },
+          "validFrom": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validUntil": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "assignedByUserId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SubuserDetailResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "username": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "contactPhone": {
+            "type": "string",
+            "nullable": true
+          },
+          "activeBoothAssignments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BoothAssignmentResponse"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SyncSessionResponse": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "customerAccountId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "totalRecords": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalChunks": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "chunkSize": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "includesMobile": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SyncStatus"
+          },
+          "offlineValidUntil": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "manifestSha256": {
+            "type": "string"
+          }
+        }
+      },
+      "SyncChunkResponse": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "chunkNo": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalChunks": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VoterSummaryResponse"
+            }
+          },
+          "chunkSha256": {
+            "type": "string"
+          },
+          "lastChunk": {
+            "type": "boolean",
+            "description": "Serialized from Java field `isLastChunk`"
+          }
+        }
+      },
+      "OfflineLeaseResponse": {
+        "type": "object",
+        "properties": {
+          "leaseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "boothAssignmentId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "subuserId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "leaseSeq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "boothValue": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "entitlementId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payloadJson": {
+            "type": "string",
+            "description": "Canonical JSON payload signed by server Ed25519 key"
+          },
+          "serverSignature": {
+            "type": "string",
+            "description": "Base64 Ed25519 signature over SHA-256 of `payloadJson`"
+          },
+          "signingKeyVersion": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "OfflineWritebackResponse": {
+        "type": "object",
+        "properties": {
+          "totalSubmitted": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalAccepted": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "totalRejected": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "PageUserSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserSummaryResponse"
+            }
+          },
+          "totalElements": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalPages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Zero-based page index"
+          },
+          "numberOfElements": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "first": {
+            "type": "boolean"
+          },
+          "last": {
+            "type": "boolean"
+          },
+          "empty": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content",
+          "totalElements",
+          "totalPages",
+          "size",
+          "number",
+          "first",
+          "last",
+          "empty"
+        ]
+      },
+      "PageCustomerSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CustomerSummaryResponse"
+            }
+          },
+          "totalElements": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalPages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Zero-based page index"
+          },
+          "numberOfElements": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "first": {
+            "type": "boolean"
+          },
+          "last": {
+            "type": "boolean"
+          },
+          "empty": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content",
+          "totalElements",
+          "totalPages",
+          "size",
+          "number",
+          "first",
+          "last",
+          "empty"
+        ]
+      },
+      "PageDatasetSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatasetSummaryResponse"
+            }
+          },
+          "totalElements": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalPages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Zero-based page index"
+          },
+          "numberOfElements": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "first": {
+            "type": "boolean"
+          },
+          "last": {
+            "type": "boolean"
+          },
+          "empty": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content",
+          "totalElements",
+          "totalPages",
+          "size",
+          "number",
+          "first",
+          "last",
+          "empty"
+        ]
+      },
+      "PageVoterSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VoterSummaryResponse"
+            }
+          },
+          "totalElements": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalPages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Zero-based page index"
+          },
+          "numberOfElements": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "first": {
+            "type": "boolean"
+          },
+          "last": {
+            "type": "boolean"
+          },
+          "empty": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content",
+          "totalElements",
+          "totalPages",
+          "size",
+          "number",
+          "first",
+          "last",
+          "empty"
+        ]
+      }
+    }
+  }
+}

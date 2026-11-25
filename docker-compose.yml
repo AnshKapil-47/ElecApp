@@ -4,120 +4,20 @@ services:
     container_name: elecsarthi-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-elecsarthi_db}
+      POSTGRES_DB: ${POSTGRES_DB:-es_test}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5498}:5432"
     volumes:
       # PostgreSQL 18 images keep data in a versioned subdirectory and require the mount at /var/lib/postgresql.
       - es_pgdata:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-elecsarthi_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-es_test}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - elecsarthi-net
-
-  # Deployment order: postgres -> migration -> runtime-role -> backend. Each step must finish successfully
-  # (service_completed_successfully) before the next one starts, so a failed migration stops the deployment.
-
-  migration:
-    # One-shot. Applies db/migration (V1..Vn) with the privileged bootstrap account, then exits. The backend
-    # never receives these credentials and never runs DDL (prod profile has Flyway disabled).
-    image: flyway/flyway:12.11.0-alpine
-    container_name: elecsarthi-flyway
-    restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-elecsarthi_db}
-      FLYWAY_USER: ${POSTGRES_USER:-postgres}
-      FLYWAY_PASSWORD: ${POSTGRES_PASSWORD}
-      FLYWAY_LOCATIONS: filesystem:/flyway/sql
-      FLYWAY_CONNECT_RETRIES: "10"
-      FLYWAY_CLEAN_DISABLED: "true"
-      FLYWAY_OUT_OF_ORDER: "false"
-    volumes:
-      - ${MIGRATIONS_DIR:-./src/main/resources/db/migration}:/flyway/sql:ro
-    command: migrate
-    networks:
-      - elecsarthi-net
-
-  runtime-role:
-    # One-shot. V2 creates the restricted role 'elecsarthi_app' with a development password that is public in
-    # the repository; this step sets DB_PASSWORD instead and refuses the development value.
-    image: postgres:18.3-bookworm
-    container_name: elecsarthi-runtime-role
-    restart: "no"
-    depends_on:
-      migration:
-        condition: service_completed_successfully
-    environment:
-      PGHOST: postgres
-      PGDATABASE: ${POSTGRES_DB:-elecsarthi_db}
-      PGUSER: ${POSTGRES_USER:-postgres}
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-      RUNTIME_DB_USER: ${DB_USER:-elecsarthi_app}
-      RUNTIME_DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
-    volumes:
-      - ./docker/db/set-runtime-password.sh:/set-runtime-password.sh:ro
-    entrypoint: ["sh", "/set-runtime-password.sh"]
-    networks:
-      - elecsarthi-net
-
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: elecsarthi-backend
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      runtime-role:
-        condition: service_completed_successfully
-    ports:
-      - "127.0.0.1:${SERVER_PORT:-8080}:8080"
-    environment:
-      SPRING_PROFILES_ACTIVE: prod
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-elecsarthi_db}
-      SPRING_DATASOURCE_USERNAME: ${DB_USER:-elecsarthi_app}
-      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
-      ELECSARTHI_JWT_SECRET: ${ELECSARTHI_JWT_SECRET:?ELECSARTHI_JWT_SECRET is required}
-      ELECSARTHI_SECURITY_ACTIVATION_PEPPER: ${ELECSARTHI_SECURITY_ACTIVATION_PEPPER:?ELECSARTHI_SECURITY_ACTIVATION_PEPPER is required}
-      ELECSARTHI_SECURITY_ED25519_PRIVATE_KEY_HEX: ${ELECSARTHI_SECURITY_ED25519_PRIVATE_KEY_HEX:?ELECSARTHI_SECURITY_ED25519_PRIVATE_KEY_HEX is required}
-      ELECSARTHI_SECURITY_ED25519_KEY_VERSION: ${ELECSARTHI_SECURITY_ED25519_KEY_VERSION:-1}
-      ELECSARTHI_SECURITY_VOTER_MOBILE_AES_KEY_HEX: ${ELECSARTHI_SECURITY_VOTER_MOBILE_AES_KEY_HEX:?ELECSARTHI_SECURITY_VOTER_MOBILE_AES_KEY_HEX is required}
-      ELECSARTHI_SECURITY_VOTER_MOBILE_KEY_VERSION: ${ELECSARTHI_SECURITY_VOTER_MOBILE_KEY_VERSION:-1}
-      MOBILE_NUMBERS_ENABLED: ${MOBILE_NUMBERS_ENABLED:-false}
-    networks:
-      - elecsarthi-net
-
-  nginx:
-    # NGINX Edge Reverse Proxy & Ingress Gateway
-    # Implements real-IP detection (X-Forwarded-For recursive parsing), security headers, and
-    # leaky-bucket rate limiting (IP-based primary throttling; coarse best-effort device ID throttling).
-    image: nginx:alpine
-    container_name: elecsarthi-nginx
-    restart: unless-stopped
-    depends_on:
-      - backend
-    ports:
-      - "${GATEWAY_PORT:-80}:80"
-      - "${GATEWAY_SSL_PORT:-443}:443"
-    volumes:
-      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./docker/nginx/certs:/etc/nginx/certs:ro
-    networks:
-      - elecsarthi-net
 
 volumes:
   es_pgdata:
     driver: local
-
-networks:
-  elecsarthi-net:
-    driver: bridge
