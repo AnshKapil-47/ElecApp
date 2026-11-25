@@ -487,7 +487,8 @@ public class DeviceSecurityIntegrationTest extends SecurityIntegrationTestSuppor
                 .andExpect(status().isOk());
         assertEquals(DeviceStatus.REVOKED, deviceRepository.findById(cust1Dev.getId()).orElseThrow().getStatus());
 
-        // 8. SUBOWNER CAN revoke any device (e.g., agent1Dev or cust2Dev) -> 200
+        // 8. SUBOWNER CAN revoke an Agent's device -> 200 (Customer/Subuser devices are Owner-only; see
+        //    SubownerWorkflowSecurityIntegrationTest#deviceRevocationScope)
         mockMvc.perform(post("/api/v1/devices/" + agent1Dev.getId() + "/revoke")
                         .header("Authorization", "Bearer " + subownerToken))
                 .andExpect(status().isOk());

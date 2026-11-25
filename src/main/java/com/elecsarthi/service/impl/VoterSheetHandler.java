@@ -51,6 +51,16 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
             "nagar_parishad_ward_no", "zilla_parishad_name_ward_no",
             "panchayat_samiti_name_ward_no", "panchayat_no");
 
+    /**
+     * Integer columns that identify a voter or the area it belongs to. A present value that is not a non-negative
+     * whole number would silently become NULL and leave a voter no area filter can find, so the row is rejected
+     * with an import issue instead. Descriptive numbers (age, section_no) stay lenient.
+     */
+    private static final Set<String> STRICT_INT_COLUMNS = Set.of(
+            "pc_no", "ac_no", "part_no", "booth_no", "serial_no",
+            "nagar_nigam_ward_no", "nagar_palika_ward_no", "nagar_parishad_ward_no",
+            "zilla_parishad_name_ward_no", "panchayat_samiti_name_ward_no", "panchayat_no");
+
     /** The COPY column list; {@link #buildRow} produces the values in exactly this order. */
     static final List<String> COPY_COLUMNS;
 
@@ -164,6 +174,15 @@ class VoterSheetHandler implements XSSFSheetXMLHandler.SheetContentsHandler {
             failedRows++;
             addIssue(rowNum, "voter_id", "MISSING_REQUIRED_FIELD", "Missing required identification field at row " + rowNum);
             return;
+        }
+        for (String column : STRICT_INT_COLUMNS) {
+            String value = currentRow.get(column);
+            Integer parsed = parseInteger(value);
+            if (value != null && (parsed == null || parsed < 0)) {
+                failedRows++;
+                addIssue(rowNum, column, "INVALID_NUMBER", "Value is not a valid non-negative whole number at row " + rowNum);
+                return;
+            }
         }
         states.add(state);
 

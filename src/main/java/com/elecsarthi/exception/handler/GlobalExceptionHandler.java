@@ -8,14 +8,24 @@ import com.elecsarthi.exception.errorcode.ErrorResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.beans.TypeMismatchException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
 
@@ -94,6 +104,47 @@ public class GlobalExceptionHandler {
         return ResponseEntity
                 .status(HttpStatus.UNAUTHORIZED)
                 .body(error(ErrorCode.UNAUTHORIZED.name(), "Authentication failed."));
+    }
+
+    /**
+     * Client mistakes that Spring MVC rejects before a controller runs (unreadable body, missing multipart part,
+     * wrong path-variable type, wrong method or media type, unknown path) are 4xx answers, never 500. The messages
+     * are fixed strings so nothing about the parser or the server internals is echoed.
+     */
+    @ExceptionHandler({HttpMessageNotReadableException.class, MissingServletRequestPartException.class,
+            MissingServletRequestParameterException.class, TypeMismatchException.class, MultipartException.class})
+    public ResponseEntity<ErrorResponse> handleUnreadableRequest(Exception ex) {
+        if (ex instanceof MaxUploadSizeExceededException) {
+            return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE)
+                    .body(error(ErrorCode.BAD_REQUEST.name(), "The uploaded file is too large."));
+        }
+        log.warn("Rejected malformed request: {}", ex.getClass().getSimpleName());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(error(ErrorCode.BAD_REQUEST.name(), "The request is malformed or incomplete."));
+    }
+
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public ResponseEntity<ErrorResponse> handleMethodValidation(HandlerMethodValidationException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(error(ErrorCode.VALIDATION_FAILED.name(), "Validation failed."));
+    }
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ErrorResponse> handleMethodNotSupported(HttpRequestMethodNotSupportedException ex) {
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .body(error(ErrorCode.BAD_REQUEST.name(), "Method not allowed."));
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<ErrorResponse> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .body(error(ErrorCode.BAD_REQUEST.name(), "Unsupported media type."));
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNoResource(NoResourceFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(error(ErrorCode.RESOURCE_NOT_FOUND.name(), "Resource not found."));
     }
 
     @ExceptionHandler(Exception.class)
