@@ -56,6 +56,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -112,7 +113,7 @@ public class DatasetServiceIntegrationTest {
     void setUp() {
         jdbcTemplate.execute(
             "ALTER TABLE audit_log DISABLE TRIGGER trg_audit_log_immutable; " +
-            "TRUNCATE TABLE booth_assignment, offline_lease, device_nonce, user_session, user_device, sync_session, entitlement, agent_sale_line, agent_sale, dataset, app_user, customer_account, audit_log, import_issue, voter CASCADE; " +
+            "TRUNCATE TABLE booth_assignment, offline_lease, device_nonce, user_session, user_device, sync_session, entitlement, agent_sale_line, agent_sale, dataset, app_user, customer_account, audit_log, import_issue, voter RESTART IDENTITY CASCADE; ALTER SEQUENCE voter_id_seq RESTART WITH 1; " +
             "ALTER TABLE audit_log ENABLE TRIGGER trg_audit_log_immutable;"
         );
 
@@ -360,6 +361,10 @@ public class DatasetServiceIntegrationTest {
     void testUploadWithoutElectionTypeResolvesUnderEveryElectionType() throws IOException {
         List<ElectionType> types = electionTypeRepository.findAll();
         assertEquals(8, types.size(), "All 8 election types must be seeded");
+        assertEquals(java.util.EnumSet.allOf(ElectionTypeCode.class),
+                types.stream().map(ElectionType::getCode).collect(java.util.stream.Collectors.toCollection(
+                        () -> java.util.EnumSet.noneOf(ElectionTypeCode.class))),
+                "Every ElectionTypeCode must be seeded");
 
         // Everything below is derived from election_type_field / election_type: nothing is hard-coded per type.
         Map<Short, List<ElectionTypeField>> filtersByType = new HashMap<>();
@@ -420,15 +425,29 @@ public class DatasetServiceIntegrationTest {
         // the sale picks the lens: each type resolves to the same dataset and the same three voters
         for (ElectionType type : types) {
             Map<String, Object> criteria = new HashMap<>();
+            // the sale form's cascade: each FILTER field in filterOrder, narrowed by the values already chosen
+            Map<String, String> chosen = new LinkedHashMap<>();
             for (ElectionTypeField filter : filtersByType.get(type.getId())) {
                 String column = filter.getSourceColumn();
+                String shown; // what the dropdown offers (the importer upper-cases text columns)
                 if (filter.getValueType() == FieldValueType.INT) {
                     criteria.put(column, 7);
+                    shown = "7";
                 } else if (guardColumns.contains(column)) {
                     criteria.put(column, "GUARD ONE");
+                    shown = "GUARD ONE";
                 } else {
                     criteria.put(column, "AREA " + column);
+                    shown = ("AREA " + column).toUpperCase(Locale.ROOT);
                 }
+                List<String> offered = electionTypeService
+                        .getCascadingFilterOptions(type.getCode().name(), DatasetTier.MASTER, column, new HashMap<>(chosen))
+                        .getValues().stream().map(String::valueOf).toList();
+                assertTrue(offered.contains(shown), type.getCode() + " dropdown for " + column + " must offer the imported value");
+                if (!chosen.isEmpty()) {
+                    assertEquals(List.of(shown), offered, type.getCode() + " dropdown for " + column + " must narrow to the chosen area");
+                }
+                chosen.put(column, shown);
             }
             CriteriaNormalizer.NormalizedCriteria area = criteriaNormalizer.normalize(type, criteria);
             new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
@@ -437,6 +456,48 @@ public class DatasetServiceIntegrationTest {
                 assertEquals(3, areaResolver.countVoters(resolved.getId(), area), type.getCode() + " must see only its area");
             });
         }
+
+        // Guard types (election_type.guard_column set): one more voter inside the same area carries a second
+        // guard value, so every guard type must now refuse the area as ambiguous.
+        Map<String, Object> extra = new LinkedHashMap<>();
+        for (String column : columnTypes.keySet()) {
+            extra.put(column, guardColumns.contains(column) ? "GUARD TWO"
+                    : columnTypes.get(column) == FieldValueType.INT ? (Object) 7 : "AREA " + column.toUpperCase(Locale.ROOT));
+        }
+        extra.put("serial_no", 99);
+        extra.put("voter_id", "EPICALL99");
+        extra.put("source_record_key_hash", "9".repeat(64));
+        jdbcTemplate.update(
+                "INSERT INTO voter (dataset_id, mobile_no_enc, " + String.join(", ", extra.keySet()) + ") VALUES (?, 'enc', "
+                        + "?, ".repeat(extra.size() - 1) + "?)",
+                java.util.stream.Stream.concat(java.util.stream.Stream.of((Object) imported.getId()), extra.values().stream()).toArray());
+
+        List<ElectionType> guardTypes = types.stream().filter(t -> t.getGuardColumn() != null).toList();
+        assertFalse(guardTypes.isEmpty(), "Some election types must define a guard column");
+        for (ElectionType type : guardTypes) {
+            Map<String, Object> criteria = new HashMap<>();
+            for (ElectionTypeField filter : filtersByType.get(type.getId())) {
+                String column = filter.getSourceColumn();
+                criteria.put(column, filter.getValueType() == FieldValueType.INT ? (Object) 7 : "AREA " + column);
+            }
+            CriteriaNormalizer.NormalizedCriteria area = criteriaNormalizer.normalize(type, criteria);
+            ApiException refused = assertThrows(ApiException.class, () ->
+                    new TransactionTemplate(transactionManager).executeWithoutResult(status ->
+                            areaResolver.resolveDataset(DatasetTier.MASTER, type, area)),
+                    type.getCode() + " must refuse an area whose voters carry two guard values");
+            assertEquals(com.elecsarthi.exception.errorcode.ErrorCode.AMBIGUOUS_AREA, refused.getErrorCode());
+        }
+    }
+
+    @Test
+    @DisplayName("Dataset list shows the states each dataset covers")
+    void testDatasetListShowsStates() throws IOException {
+        DatasetDetailResponse imported = datasetImportService.importDataset(
+                xlsx("states.xlsx", createSampleVoterXlsx(2)), masterRequest("Haryana List", null), owner.getId());
+
+        var page = datasetService.listDatasets(org.springframework.data.domain.PageRequest.of(0, 10));
+        var summary = page.getContent().stream().filter(s -> s.getId().equals(imported.getId())).findFirst().orElseThrow();
+        assertEquals(List.of("HARYANA"), summary.getStates());
     }
 
     private DatasetUploadRequest masterRequest(String name, Long supersedes) {

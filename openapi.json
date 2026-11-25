@@ -3963,14 +3963,6 @@
           "supersedesDatasetId": {
             "type": "integer",
             "format": "int64"
-          },
-          "criteria": {
-            "type": "object",
-            "additionalProperties": {},
-            "example": {
-              "state": "RAJASTHAN",
-              "ac_no": 12
-            }
           }
         }
       },
@@ -4751,6 +4743,12 @@
           "failedRows": {
             "type": "integer",
             "format": "int32"
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "deleteAfter": {
             "type": "string",

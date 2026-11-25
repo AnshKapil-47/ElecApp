@@ -25,6 +25,7 @@ public class DatasetMapper {
                 .totalRows(d.getTotalRows())
                 .importedRows(d.getImportedRows())
                 .failedRows(d.getFailedRows())
+                .states(d.getStates())
                 .deleteAfter(d.getDeleteAfter())
                 .createdAt(d.getCreatedAt())
                 .completedAt(d.getCompletedAt())

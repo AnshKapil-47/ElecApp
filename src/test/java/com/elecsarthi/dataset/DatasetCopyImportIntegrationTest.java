@@ -67,7 +67,7 @@ class DatasetCopyImportIntegrationTest {
         jdbcTemplate.execute(
                 "ALTER TABLE audit_log DISABLE TRIGGER trg_audit_log_immutable; "
                         + "TRUNCATE TABLE booth_assignment, offline_lease, device_nonce, user_session, user_device, sync_session, entitlement, "
-                        + "agent_sale_line, agent_sale, dataset, app_user, customer_account, audit_log, import_issue, voter CASCADE; "
+                        + "agent_sale_line, agent_sale, dataset, app_user, customer_account, audit_log, import_issue, voter RESTART IDENTITY CASCADE; ALTER SEQUENCE voter_id_seq RESTART WITH 1; "
                         + "ALTER TABLE audit_log ENABLE TRIGGER trg_audit_log_immutable;");
         owner = userRepository.save(AppUser.builder()
                 .username("copy_owner")

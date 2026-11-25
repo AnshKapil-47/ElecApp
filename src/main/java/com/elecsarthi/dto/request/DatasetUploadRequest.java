@@ -10,12 +10,10 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
-import java.util.Map;
-
 /**
  * Metadata for a dataset upload. Datasets are election-type agnostic: the election type is picked by the
  * Agent at sale time. Unknown properties (e.g. a legacy {@code electionTypeCode} sent by older web forms)
- * are ignored.
+ * are ignored; so is the legacy {@code criteria} property, which was never used.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Getter
@@ -32,10 +30,4 @@ public class DatasetUploadRequest {
     private DatasetTier storageTier;
 
     private Long supersedesDatasetId;
-
-    /**
-     * Criteria parameters for filtering this dataset's intended scope
-     * e.g. {"state": "MAHARASHTRA", "ac_no": 12}
-     */
-    private Map<String, Object> criteria;
 }
