@@ -268,9 +268,9 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
 - **Rules Enforced:** Formats voter data using `on_slip = true` metadata.
 
 ### 8.4 Turnout Marking & Unmarking
-- `POST /api/v1/turnout/mark`: Customer or Subuser marks voter. `ON CONFLICT DO NOTHING`. Server timestamp.
+- `POST /api/v1/turnout/mark`: Customer or Subuser marks voter. `ON CONFLICT DO NOTHING`. Server timestamp. A repeated mark is a confirmation and returns the stored first-mark time.
 - `POST /api/v1/turnout/unmark`: Customer only (online). Subusers strictly forbidden.
-- `POST /api/v1/turnout/reset`: Customer only.
+- `POST /api/v1/turnout/reset`: Customer only. Unmark and reset write `TURNOUT_UNMARKED` / `TURNOUT_RESET` audit rows (counts only, no voter data).
 - `GET /api/v1/turnout/statistics`: Live counts and percentages by booth and gender.
 
 ---

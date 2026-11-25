@@ -10,6 +10,7 @@ import com.elecsarthi.dto.response.TurnoutResponse;
 import com.elecsarthi.dto.response.TurnoutStatisticsResponse;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.Entitlement;
+import com.elecsarthi.enums.AuditOutcome;
 import com.elecsarthi.enums.EntitlementStatus;
 import com.elecsarthi.enums.Role;
 import com.elecsarthi.enums.TurnoutSource;
@@ -19,6 +20,7 @@ import com.elecsarthi.repository.ElectionTypeRepository;
 import com.elecsarthi.repository.EntitlementRepository;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer.VoterScope;
 import com.elecsarthi.security.authorization.VoterScopeAuthorizer;
+import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.TurnoutService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -39,6 +41,7 @@ public class TurnoutServiceImpl implements TurnoutService {
     private final ElectionTypeRepository electionTypeRepository;
     private final VoterScopeAuthorizer voterScopeAuthorizer;
     private final JdbcTemplate jdbcTemplate;
+    private final AuditService auditService;
     private final Clock clock;
 
     @Override
@@ -64,18 +67,22 @@ public class TurnoutServiceImpl implements TurnoutService {
             throw new ResourceNotFoundException("Voter not found in entitlement area or assigned booth: " + request.getVoterRowId());
         }
 
-        Instant now = clock.instant();
         String insertSql = "INSERT INTO voter_turnout (dataset_id, customer_account_id, voter_row_id, marked_by_user_id, marked_at, source) " +
                 "VALUES (?, ?, ?, ?, clock_timestamp(), 'ONLINE') " +
                 "ON CONFLICT (dataset_id, customer_account_id, voter_row_id) DO NOTHING";
 
         jdbcTemplate.update(insertSql, ent.getDatasetId(), customerAccountId, request.getVoterRowId(), callerUserId);
 
+        // The first valid mark wins and repeats are confirmations: report the stored time, not the time of this call.
+        Instant markedAt = jdbcTemplate.queryForObject(
+                "SELECT marked_at FROM voter_turnout WHERE dataset_id = ? AND customer_account_id = ? AND voter_row_id = ?",
+                java.sql.Timestamp.class, ent.getDatasetId(), customerAccountId, request.getVoterRowId()).toInstant();
+
         return TurnoutResponse.builder()
                 .customerAccountId(customerAccountId)
                 .voterRowId(request.getVoterRowId())
                 .voted(true)
-                .markedAt(now)
+                .markedAt(markedAt)
                 .source(TurnoutSource.ONLINE)
                 .build();
     }
@@ -103,8 +110,10 @@ public class TurnoutServiceImpl implements TurnoutService {
         deleteParams.add(request.getVoterRowId());
         deleteParams.addAll(scope.params());
 
-        jdbcTemplate.update(deleteSql, deleteParams.toArray());
+        int removed = jdbcTemplate.update(deleteSql, deleteParams.toArray());
         log.info("Turnout unmarked for dataset={}, customer={}, voter={}", ent.getDatasetId(), customerAccountId, request.getVoterRowId());
+        auditService.logDetails(callerUserId, customerAccountId, ent.getDatasetId(), null, "TURNOUT_UNMARKED", AuditOutcome.SUCCESS,
+                "voter_turnout", String.valueOf(request.getVoterRowId()), AuditService.details("removed", removed), null);
     }
 
     @Override
@@ -134,8 +143,12 @@ public class TurnoutServiceImpl implements TurnoutService {
         }
         deleteSql.append(")");
 
-        jdbcTemplate.update(deleteSql.toString(), params.toArray());
+        int removed = jdbcTemplate.update(deleteSql.toString(), params.toArray());
         log.info("Turnout reset for entitlement={}, booth={}", ent.getId(), request.getBoothNo());
+        auditService.logDetails(callerUserId, customerAccountId, ent.getDatasetId(), null, "TURNOUT_RESET", AuditOutcome.SUCCESS,
+                "entitlement", String.valueOf(ent.getId()),
+                request.getBoothNo() != null ? AuditService.details("booth", request.getBoothNo(), "removed", removed)
+                        : AuditService.details("removed", removed), null);
     }
 
     @Override

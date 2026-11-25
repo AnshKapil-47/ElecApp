@@ -270,7 +270,10 @@ public class SubuserServiceImpl implements SubuserService {
         AppUser subuser = userRepository.findById(subuserId)
                 .orElseThrow(() -> new ResourceNotFoundException("Subuser not found"));
 
-        if (!customerAccountId.equals(subuser.getCustomerAccountId())) {
+        // Only Subusers are returned here (not the Customer's own primary login). A Customer sees only its own;
+        // the Owner (support) has no Customer account of its own and may look at any Subuser.
+        boolean sameCustomer = customerAccountId != null && customerAccountId.equals(subuser.getCustomerAccountId());
+        if (subuser.getRole() != Role.SUBUSER || (callerRole != Role.OWNER && !sameCustomer)) {
             throw new ResourceNotFoundException("Subuser not found");
         }
 
@@ -286,7 +289,7 @@ public class SubuserServiceImpl implements SubuserService {
                 .username(subuser.getUsername())
                 .fullName(subuser.getFullName())
                 .role(subuser.getRole())
-                .customerAccountId(customerAccountId)
+                .customerAccountId(subuser.getCustomerAccountId())
                 .status(subuser.getStatus())
                 .activeBoothAssignments(assignments)
                 .createdAt(subuser.getCreatedAt())
