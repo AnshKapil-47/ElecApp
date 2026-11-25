@@ -113,4 +113,79 @@ public class CustomerActivationSecurityIntegrationTest extends SecurityIntegrati
         assertEquals(400, ex.getStatus().value());
         assertTrue(ex.getMessage().contains("Invalid activation credentials or account not eligible for activation"));
     }
+
+    @Test
+    @DisplayName("Batch 4: login for an unknown identifier costs as much as a wrong password (no timing oracle)")
+    void unknownIdentifierLoginCostsAsMuchAsWrongPassword() {
+        userRepository.save(AppUser.builder().username("timing_user").fullName("Timing User")
+                .passwordHash(passwordEncoder.encode("Password123!")).role(Role.OWNER).status(UserStatus.ACTIVE).build());
+        com.elecsarthi.dto.request.LoginRequest known = com.elecsarthi.dto.request.LoginRequest.builder()
+                .identifier("timing_user").password("not-the-password").clientType(com.elecsarthi.enums.ClientType.WEB).build();
+        com.elecsarthi.dto.request.LoginRequest unknown = com.elecsarthi.dto.request.LoginRequest.builder()
+                .identifier("nobody_here").password("not-the-password").clientType(com.elecsarthi.enums.ClientType.WEB).build();
+
+        // warm-up so class loading and the one-time dummy hash do not skew the comparison
+        assertThrows(ApiException.class, () -> authService.login(known, "10.20.30.40"));
+        assertThrows(ApiException.class, () -> authService.login(unknown, "10.20.30.40"));
+
+        long knownNanos = timeLogin(known);
+        long unknownNanos = timeLogin(unknown);
+        // BCrypt cost 12 is ~100-300 ms; without the dummy check an unknown identifier answers in a few ms
+        assertTrue(unknownNanos > knownNanos / 3,
+                "unknown identifier answered in " + unknownNanos / 1_000_000 + " ms vs " + knownNanos / 1_000_000 + " ms for a wrong password");
+    }
+
+    private long timeLogin(com.elecsarthi.dto.request.LoginRequest request) {
+        long best = Long.MAX_VALUE;
+        for (int i = 0; i < 3; i++) {
+            long start = System.nanoTime();
+            assertThrows(ApiException.class, () -> authService.login(request, "10.20.30.40"));
+            best = Math.min(best, System.nanoTime() - start);
+        }
+        return best;
+    }
+
+    @Test
+    @DisplayName("Batch 4: an expired code is refused even when it is the right code, and the account stays PENDING")
+    void expiredCodeIsRefused() {
+        AppUser creator = userRepository.save(AppUser.builder()
+                .username("creator_exp_1").fullName("Creator").passwordHash(passwordEncoder.encode("Password123!"))
+                .role(Role.OWNER).status(UserStatus.ACTIVE).build());
+        CustomerAccount customer = customerAccountRepository.save(CustomerAccount.builder()
+                .customerName("Expired Code Customer").contactPhone("+919876500002")
+                .status(UserStatus.ACTIVE).activationStatus(ActivationStatus.PENDING)
+                .activationCodeHash(CryptoUtils.hmacSha256Hex("EXPIREDCD1", appProperties.getSecurity().getActivationPepper()))
+                .activationCodeExpiresAt(Instant.now().minus(1, ChronoUnit.HOURS))
+                .activationAttemptCount((short) 0).createdByUserId(creator.getId()).build());
+
+        ApiException ex = assertThrows(ApiException.class, () -> authService.activateCustomer(
+                CustomerActivateRequest.builder().contactPhone("+919876500002").activationCode("EXPIREDCD1").password("NewSecret@123").build(), "127.0.0.1"));
+        assertEquals(400, ex.getStatus().value());
+        assertEquals("ACTIVATION_CODE_EXPIRED", ex.getErrorCode().name());
+        assertEquals(ActivationStatus.PENDING, customerAccountRepository.findById(customer.getId()).orElseThrow().getActivationStatus());
+    }
+
+    @Test
+    @DisplayName("Batch 4: a wrong code on a registered pending phone is indistinguishable from an unknown phone")
+    void wrongCodeOnRegisteredPhoneLooksLikeUnknownPhone() {
+        AppUser creator = userRepository.save(AppUser.builder()
+                .username("creator_enum_1").fullName("Creator").passwordHash(passwordEncoder.encode("Password123!"))
+                .role(Role.OWNER).status(UserStatus.ACTIVE).build());
+        customerAccountRepository.save(CustomerAccount.builder()
+                .customerName("Enumeration Test Customer").contactPhone("+919876500001")
+                .status(UserStatus.ACTIVE).activationStatus(ActivationStatus.PENDING)
+                .activationCodeHash(CryptoUtils.hmacSha256Hex("REALCODE12", appProperties.getSecurity().getActivationPepper()))
+                .activationCodeExpiresAt(Instant.now().plus(72, ChronoUnit.HOURS))
+                .activationAttemptCount((short) 0).createdByUserId(creator.getId()).build());
+
+        ApiException unknown = assertThrows(ApiException.class, () -> authService.activateCustomer(
+                CustomerActivateRequest.builder().contactPhone("+919876500099").activationCode("WRONGCODE1").password("NewSecret@123").build(), "127.0.0.1"));
+        ApiException known = assertThrows(ApiException.class, () -> authService.activateCustomer(
+                CustomerActivateRequest.builder().contactPhone("+919876500001").activationCode("WRONGCODE1").password("NewSecret@123").build(), "127.0.0.1"));
+
+        assertEquals(unknown.getStatus(), known.getStatus());
+        assertEquals(unknown.getErrorCode(), known.getErrorCode());
+        assertEquals(unknown.getMessage(), known.getMessage());
+        assertFalse(known.getMessage().toLowerCase().contains("attempt"), "the attempt counter must not be revealed");
+    }
 }

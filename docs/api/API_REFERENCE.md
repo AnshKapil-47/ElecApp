@@ -41,23 +41,24 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
   ```
 
 ### 1.2 Customer Activation & Primary Login
-- **Endpoint:** `POST /api/v1/auth/customer-activate`
+- **Endpoint:** `POST /api/v1/auth/activate`
 - **Access:** Public (Mobile only)
 - **Request Body:**
   ```json
   {
     "contactPhone": "+919876543210",
     "activationCode": "W4B9K2M7XZ",
-    "password": "NewSecurePassword123!",
-    "deviceId": "b1b7ef38-..."
+    "password": "NewSecurePassword123!"
   }
   ```
 - **Rules Enforced:**
   - 10-character Crockford Base32 verification against HMAC-SHA-256 peppered hash.
-  - Max 5 failed attempts before permanent lockout.
-  - 72-hour expiration window.
-  - Binds verified device and transitions account to `ACTIVATED`.
-- **Response (200 OK):** Same structure as LoginResponse.
+  - Max 5 failed attempts, then `403 ACTIVATION_MAX_ATTEMPTS_EXCEEDED` until the owning Agent, Owner or Subowner re-issues the code.
+  - 72-hour expiration window (`400 ACTIVATION_CODE_EXPIRED`).
+  - The password must be at least 8 characters (no other composition rule).
+  - An unknown phone, a wrong code and an already-activated account all return the same `400` and message, so the endpoint does not reveal which phones are registered. Rate limits: 20 requests per minute per IP, 10 per minute per phone (`429`).
+  - Sets the password, transitions the account to `ACTIVATED` and clears the code. No device is bound here: the app registers its device with the returned `registrationToken` (`POST /devices/register`, `/devices/verify`) and then logs in with `clientType=MOBILE`.
+- **Response (200 OK):** `{ message, registrationToken, userId, role, customerAccountId }`.
 
 ### 1.3 Mobile Refresh Token Rotation
 - **Endpoint:** `POST /api/v1/auth/refresh`
@@ -254,6 +255,9 @@ This document details the RESTful APIs exposed by the ElecSarthi election voter-
   - Server-side pagination capped at 100.
   - whitelisted column queries with parameterized binds.
   - 3-gate Mobile Number Protection: Unmasked ONLY IF global enabled + CUSTOMER role + entitlement `mobile_access=true`. Otherwise masked or omitted. Subusers NEVER see unmasked numbers.
+  - `page` (default 0) and `limit` (default 50, max 100) are optional in the JSON body.
+  - **Field visibility is decided on the server by the election type** (`election_type_field`, FILTER + DISPLAY columns). A property of the response whose column the entitlement's election type does not list is always `null`; configured columns that have no fixed property (e.g. `tehsil`, `pincode`, Panchayat names and ward numbers) are returned in `additionalFields`, keyed by column name. This applies to search, details, family and sync chunks; the slip carries only the `on_slip` columns.
+  - `sortBy` and `sortDirection` are accepted but ignored: results are ordered by booth, then serial number.
 
 ### 8.2 Family Clustering
 - **Endpoint:** `GET /api/v1/voters/{id}/family?entitlementId={id}`

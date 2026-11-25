@@ -132,7 +132,7 @@ public class SyncServiceImpl implements SyncService {
                 .userId(customerUserId)
                 .entitlementId(ent.getId())
                 .deviceId(deviceId)
-                .protocolVersion(request.getProtocolVersion())
+                .protocolVersion(request.getProtocolVersion() != null ? request.getProtocolVersion() : (short) 1)
                 .manifestSha256(manifestSha256)
                 .scopeSnapshot(ent.getCriteria())
                 .policyVersion(1)
@@ -248,7 +248,7 @@ public class SyncServiceImpl implements SyncService {
 
         boolean mobileUnmasked = mobileNumbersVisible(callerRole, ent);
         List<VoterSummaryResponse> records = jdbcTemplate.query(sql.toString(),
-                voterMapper.summaryRowMapper(boothColumn, mobileUnmasked), params.toArray());
+                voterMapper.summaryRowMapper(boothColumn, mobileUnmasked, electionType.getId()), params.toArray());
 
         session.setChunksDone(Math.max(session.getChunksDone(), chunkNo + 1));
         syncSessionRepository.save(session);

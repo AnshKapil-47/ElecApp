@@ -118,6 +118,8 @@ public class AuthServiceImpl implements AuthService {
                 customerAccountRepository.findByContactPhone(identifier)
                         .flatMap(customer -> userRepository.findByCustomerAccountIdAndRole(customer.getId(), Role.CUSTOMER)));
         if (found.isEmpty()) {
+            // Do the same BCrypt work as for a real user, so the response time does not reveal which identifiers exist.
+            passwordEncoder.matches(request.getPassword(), dummyPasswordHash());
             auditService.logDetails(null, null, null, null, "LOGIN", AuditOutcome.DENIED,
                     "app_user", identifier, AuditService.details("reason", "User not found"), clientIp);
             throw new UnauthorizedException("Invalid username or password.");
@@ -130,6 +132,18 @@ public class AuthServiceImpl implements AuthService {
             throw new UnauthorizedException("Invalid username or password.");
         }
         return user;
+    }
+
+    /** A hash nobody knows the password of, made once with the configured encoder (same cost as real hashes). */
+    private volatile String dummyPasswordHash;
+
+    private String dummyPasswordHash() {
+        String hash = dummyPasswordHash;
+        if (hash == null) {
+            hash = passwordEncoder.encode(UUID.randomUUID().toString());
+            dummyPasswordHash = hash;
+        }
+        return hash;
     }
 
     private void requireUsableAccount(AppUser user) {
@@ -482,7 +496,9 @@ public class AuthServiceImpl implements AuthService {
         if (!hashesMatch(presentedHash, customer.getActivationCodeHash())) {
             short attempts = (short) (customer.getActivationAttemptCount() + 1);
             recordFailedActivation(customer.getId(), attempts, clientIp);
-            throw new BadRequestException("Invalid activation code. Attempts remaining: " + Math.max(0, maxAttempts - attempts));
+            // Same response as an unknown phone: a wrong code must not reveal that the phone is registered,
+            // nor how many attempts are left. The lockout itself is still enforced above.
+            throw new BadRequestException(INVALID_ACTIVATION);
         }
 
         customer.setActivationStatus(ActivationStatus.ACTIVATED);

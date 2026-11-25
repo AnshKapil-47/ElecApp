@@ -17,6 +17,6 @@ public class StartSyncSessionRequest {
     @NotNull(message = "Entitlement ID is required")
     private Long entitlementId;
 
-    @Builder.Default
-    private short protocolVersion = 1;
+    /** Optional; protocol version 1 is assumed when omitted (a primitive short made it mandatory in JSON). */
+    private Short protocolVersion;
 }

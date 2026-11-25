@@ -55,6 +55,7 @@ public class VoterServiceImpl implements VoterService {
 
     private static final String ACTION_GLOBAL_MOBILE_TOGGLE = "GLOBAL_MOBILE_TOGGLE";
     private static final int MAX_PAGE_SIZE = 100;
+    private static final int DEFAULT_PAGE_SIZE = 50;
 
     private static final String VOTER_WITH_TURNOUT = "SELECT v.*, vt.marked_at AS turnout_marked_at, (vt.marked_at IS NOT NULL) AS is_voted "
             + "FROM voter v "
@@ -88,8 +89,8 @@ public class VoterServiceImpl implements VoterService {
         Access access = authorize(callerUserId, callerRole, customerAccountId, request.getEntitlementId());
         VoterScope scope = access.scope();
 
-        int limit = Math.min(Math.max(1, request.getLimit()), MAX_PAGE_SIZE);
-        int page = Math.max(0, request.getPage());
+        int limit = Math.min(Math.max(1, request.getLimit() != null ? request.getLimit() : DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE);
+        int page = Math.max(0, request.getPage() != null ? request.getPage() : 0);
         PageRequest pageRequest = PageRequest.of(page, limit);
 
         if (request.getBooth() != null && scope.allowedBooths() != null && !scope.allowedBooths().contains(request.getBooth())) {
@@ -113,7 +114,7 @@ public class VoterServiceImpl implements VoterService {
         String sql = VOTER_WITH_TURNOUT + where
                 + " ORDER BY v." + access.boothColumn() + " ASC, v.serial_no ASC LIMIT ? OFFSET ?";
         List<VoterSummaryResponse> voters = jdbcTemplate.query(sql,
-                voterMapper.summaryRowMapper(access.boothColumn(), access.mobileUnmasked()), selectParams.toArray());
+                voterMapper.summaryRowMapper(access.boothColumn(), access.mobileUnmasked(), access.electionType().getId()), selectParams.toArray());
         return new PageImpl<>(voters, pageRequest, total);
     }
 
@@ -172,7 +173,7 @@ public class VoterServiceImpl implements VoterService {
         params.addAll(access.scope().params());
         List<VoterDetailResponse> found = jdbcTemplate.query(
                 VOTER_WITH_TURNOUT + "WHERE v.id = ? AND " + access.scope().whereClause(),
-                voterMapper.detailRowMapper(access.boothColumn(), access.mobileUnmasked()), params.toArray());
+                voterMapper.detailRowMapper(access.boothColumn(), access.mobileUnmasked(), access.electionType().getId()), params.toArray());
         if (found.isEmpty()) {
             throw new ResourceNotFoundException("Voter not found with ID: " + voterId);
         }
@@ -208,7 +209,7 @@ public class VoterServiceImpl implements VoterService {
         return jdbcTemplate.query(
                 VOTER_WITH_TURNOUT + "WHERE v.house_no = ? AND v." + boothColumn + " = ? AND " + access.scope().whereClause()
                         + " ORDER BY v.serial_no ASC",
-                voterMapper.summaryRowMapper(boothColumn, access.mobileUnmasked()), familyParams.toArray());
+                voterMapper.summaryRowMapper(boothColumn, access.mobileUnmasked(), access.electionType().getId()), familyParams.toArray());
     }
 
     @Override
@@ -226,8 +227,9 @@ public class VoterServiceImpl implements VoterService {
         }
         Map<String, Object> voter = rows.get(0);
 
-        List<VoterSlipFieldResponse> slipFields = fieldRepository
-                .findByElectionTypeIdAndOnSlipTrueOrderByDisplayOrderAsc(access.electionType().getId()).stream()
+        List<ElectionTypeField> slipConfig = fieldRepository
+                .findByElectionTypeIdAndOnSlipTrueOrderByDisplayOrderAsc(access.electionType().getId());
+        List<VoterSlipFieldResponse> slipFields = slipConfig.stream()
                 .map((ElectionTypeField field) -> VoterSlipFieldResponse.builder()
                         .sourceColumn(field.getSourceColumn())
                         .labelEn(field.getLabelEn())
@@ -235,22 +237,25 @@ public class VoterServiceImpl implements VoterService {
                         .value(voter.get(field.getSourceColumn()))
                         .build())
                 .toList();
+        // The fixed header of the slip shows only what this election type puts on a slip.
+        Map<String, Object> onSlip = new java.util.HashMap<>();
+        slipConfig.forEach(field -> onSlip.put(field.getSourceColumn(), voter.get(field.getSourceColumn())));
 
         Integer boothValue = (Integer) voter.get(access.boothColumn());
         return VoterSlipResponse.builder()
                 .voterRowId(voterId)
-                .voterId((String) voter.get("voter_id"))
-                .serialNo((Integer) voter.get("serial_no"))
-                .partNo((Integer) voter.get("part_no"))
+                .voterId((String) onSlip.get("voter_id"))
+                .serialNo((Integer) onSlip.get("serial_no"))
+                .partNo((Integer) onSlip.get("part_no"))
                 .boothNo(boothValue != null ? boothValue : (Integer) voter.get("booth_no"))
-                .fullNameEn(fullName(voter.get("v_fname_en"), voter.get("v_lname_en")))
-                .fullNameMt(fullName(voter.get("v_fname_mt"), voter.get("v_lname_mt")))
-                .relationNameEn(fullName(voter.get("vr_fname_en"), voter.get("vr_lname_en")))
-                .houseNo((String) voter.get("house_no"))
-                .age((Integer) voter.get("age"))
-                .gender((String) voter.get("sex"))
-                .pollingStationEn((String) voter.get("booth_name_en"))
-                .pollingStationAddressEn((String) voter.get("booth_address_en"))
+                .fullNameEn(fullName(onSlip.get("v_fname_en"), onSlip.get("v_lname_en")))
+                .fullNameMt(fullName(onSlip.get("v_fname_mt"), onSlip.get("v_lname_mt")))
+                .relationNameEn(fullName(onSlip.get("vr_fname_en"), onSlip.get("vr_lname_en")))
+                .houseNo((String) onSlip.get("house_no"))
+                .age((Integer) onSlip.get("age"))
+                .gender((String) onSlip.get("sex"))
+                .pollingStationEn((String) onSlip.get("booth_name_en"))
+                .pollingStationAddressEn((String) onSlip.get("booth_address_en"))
                 .slipFields(slipFields)
                 .build();
     }

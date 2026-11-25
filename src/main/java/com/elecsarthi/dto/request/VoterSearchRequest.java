@@ -22,10 +22,9 @@ public class VoterSearchRequest {
     private Integer maxAge;
     private String houseNo;
     private Boolean voted;
-    @Builder.Default
-    private int page = 0;
-    @Builder.Default
-    private int limit = 50;
+    /** Optional; the service applies page 0 and 50 rows when they are omitted (a primitive int made them mandatory in JSON). */
+    private Integer page;
+    private Integer limit;
     private String sortBy;
     @Builder.Default
     private String sortDirection = "ASC";
