@@ -92,7 +92,7 @@ public class AuthServiceImpl implements AuthService {
 
         AppUser user = authenticate(request, clientIp);
         requireUsableAccount(user);
-        requireClientTypeAllowed(user.getRole(), request.getClientType());
+        requireClientTypeAllowed(user, request.getClientType(), clientIp);
 
         UserDevice device = null;
         if (request.getClientType() == ClientType.MOBILE) {
@@ -103,7 +103,7 @@ public class AuthServiceImpl implements AuthService {
             device = requireSameInstallation(user, activeDevice.get(), request.getInstallationId(), clientIp);
         }
 
-        enforceSessionLimit(user, device, now);
+        enforceSessionLimit(user, device, now, clientIp);
         return openSession(user, device, request.getClientType(), now, clientIp);
     }
 
@@ -150,13 +150,19 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /** Owner and Subowner use the web console only; every other role uses the mobile app only. */
-    private static void requireClientTypeAllowed(Role role, ClientType clientType) {
-        boolean webRole = role == Role.OWNER || role == Role.SUBOWNER;
+    private void requireClientTypeAllowed(AppUser user, ClientType clientType, String clientIp) {
+        boolean webRole = user.getRole() == Role.OWNER || user.getRole() == Role.SUBOWNER;
+        String refusal = null;
         if (clientType == ClientType.WEB && !webRole) {
-            throw new ForbiddenException("Mobile application users cannot log in to the web console.");
+            refusal = "Mobile application users cannot log in to the web console.";
+        } else if (clientType == ClientType.MOBILE && webRole) {
+            refusal = "Web console administrators cannot log in to the mobile application.";
         }
-        if (clientType == ClientType.MOBILE && webRole) {
-            throw new ForbiddenException("Web console administrators cannot log in to the mobile application.");
+        if (refusal != null) {
+            auditService.logDetails(user.getId(), user.getCustomerAccountId(), null, null, "LOGIN", AuditOutcome.DENIED,
+                    "app_user", user.getUsername(), AuditService.details("reason", "Client type not allowed for role",
+                            "clientType", clientType), clientIp);
+            throw new ForbiddenException(refusal);
         }
     }
 
@@ -202,7 +208,7 @@ public class AuthServiceImpl implements AuthService {
      * Expired sessions are closed first. When the limit is still reached, a login proving the user's ACTIVE
      * device replaces that device's own session; any other login is rejected and never evicts a session.
      */
-    private void enforceSessionLimit(AppUser user, UserDevice device, Instant now) {
+    private void enforceSessionLimit(AppUser user, UserDevice device, Instant now, String clientIp) {
         int maxSessions = switch (user.getRole()) {
             case OWNER, SUBOWNER -> 3;
             case AGENT, CUSTOMER, SUBUSER -> 1;
@@ -218,15 +224,26 @@ public class AuthServiceImpl implements AuthService {
             return;
         }
         if (device == null) {
+            auditSessionLimitDenied(user, null, maxSessions, clientIp);
             throw new ConflictException(ErrorCode.SESSION_LIMIT_EXCEEDED, "Concurrent session limit reached (" + maxSessions + ").");
         }
         UserSession sameDeviceSession = liveSessions.stream()
                 .filter(session -> device.getId().equals(session.getDeviceId()))
                 .findFirst()
-                .orElseThrow(() -> new ConflictException(ErrorCode.SESSION_LIMIT_EXCEEDED,
-                        "Concurrent session limit reached. You are logged in on another device."));
+                .orElseThrow(() -> {
+                    auditSessionLimitDenied(user, device, maxSessions, clientIp);
+                    return new ConflictException(ErrorCode.SESSION_LIMIT_EXCEEDED,
+                            "Concurrent session limit reached. You are logged in on another device.");
+                });
         sameDeviceSession.terminate(now, "REPLACED_SAME_DEVICE", user.getId());
         sessionRepository.save(sameDeviceSession);
+    }
+
+    /** A login refused because the account is at its concurrent-session limit is audited as DENIED (no secrets). */
+    private void auditSessionLimitDenied(AppUser user, UserDevice device, int maxSessions, String clientIp) {
+        auditService.logDetails(user.getId(), user.getCustomerAccountId(), null, device == null ? null : device.getId(),
+                "LOGIN", AuditOutcome.DENIED, "app_user", user.getUsername(),
+                AuditService.details("reason", "Concurrent session limit reached", "limit", maxSessions), clientIp);
     }
 
     /** Terminates the session if its absolute or idle lifetime is over; returns whether it did. */

@@ -17,7 +17,7 @@ public interface UserService {
 
     Page<UserSummaryResponse> listUsersByRole(Role role, Pageable pageable);
 
-    UserDetailResponse getUser(Long id);
+    UserDetailResponse getUser(Long id, Long callerUserId, Role callerRole);
 
     void updateUserStatus(Long id, UserStatus newStatus, Long callerUserId, Role callerRole);
 

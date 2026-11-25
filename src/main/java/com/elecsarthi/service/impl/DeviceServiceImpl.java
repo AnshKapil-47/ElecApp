@@ -236,8 +236,17 @@ public class DeviceServiceImpl implements DeviceService {
         }
 
         // Role-based revocation authorization grounded in authenticated database user & role
-        if (effectiveRole == Role.OWNER || effectiveRole == Role.SUBOWNER) {
-            // Owner and Subowner have authority to revoke any device
+        if (effectiveRole == Role.OWNER) {
+            // The Owner may revoke any device
+        } else if (effectiveRole == Role.SUBOWNER) {
+            // Permission matrix: revoking Customer/Subuser devices is Owner-only; a Subowner manages Agents only.
+            // Anything else is concealed as not found.
+            boolean agentDevice = userRepository.findById(device.getUserId())
+                    .map(deviceUser -> deviceUser.getRole() == Role.AGENT)
+                    .orElse(false);
+            if (!agentDevice) {
+                throw new ResourceNotFoundException("Device not found");
+            }
         } else if (effectiveRole == Role.AGENT) {
             // Agent can only revoke devices belonging to customers assigned to this agent (or their subusers)
             if (device.getUserId().equals(callerUserId)) {

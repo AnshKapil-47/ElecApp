@@ -104,8 +104,11 @@ public class UserServiceImpl implements UserService {
 
     @Override
     @Transactional(readOnly = true)
-    public UserDetailResponse getUser(Long id) {
+    public UserDetailResponse getUser(Long id, Long callerUserId, Role callerRole) {
+        // A Subowner sees Agent accounts and its own (Owner, other Subowners, Customer logins and Subusers are outside
+        // its scope; a Customer login's username is the Customer's phone number). Out of scope looks exactly like missing.
         AppUser user = userRepository.findById(id)
+                .filter(found -> callerRole != Role.SUBOWNER || found.getRole() == Role.AGENT || found.getId().equals(callerUserId))
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with ID: " + id));
 
         int activeSessions = sessionRepository.findByUserIdAndStatus(id, SessionStatus.ACTIVE).size();

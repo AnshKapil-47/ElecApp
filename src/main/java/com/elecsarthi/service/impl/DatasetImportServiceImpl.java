@@ -25,6 +25,9 @@ import com.elecsarthi.service.AuditService;
 import com.elecsarthi.service.DatasetImportService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
+import org.apache.poi.openxml4j.exceptions.InvalidOperationException;
+import org.apache.poi.openxml4j.exceptions.NotOfficeXmlFileException;
 import org.apache.poi.openxml4j.opc.OPCPackage;
 import org.apache.poi.util.XMLHelper;
 import org.apache.poi.xssf.eventusermodel.XSSFReader;
@@ -123,6 +126,10 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             jdbcTemplate.execute("SELECT create_dataset_partitions(" + datasetId + ");");
 
             VoterSheetHandler rows = copyRows(tempFile, datasetId, now);
+            if (rows.importedRows() == 0) {
+                throw new BadRequestException("The file contains no importable voter rows. Check that the first row holds "
+                        + "the column headers (including state, voter_id and serial_no) and that the rows are filled in.");
+            }
 
             rejectOverlap(datasetId, request.getStorageTier(), request.getSupersedesDatasetId());
             jdbcTemplate.execute("SELECT create_dataset_indexes(" + datasetId + ");");
@@ -148,15 +155,33 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             return datasetMapper.toDetailResponse(dataset, rows.issues());
         } catch (Exception e) {
             discardFailedDataset(dataset);
-            if (e instanceof ApiException apiException) {
-                log.warn("Dataset import rejected: {}", apiException.getMessage());
-                throw apiException;
+            ApiException rejection = e instanceof ApiException apiException ? apiException : duplicateRecordsRejection(e);
+            if (rejection != null) {
+                log.warn("Dataset import rejected: {}", rejection.getMessage());
+                throw rejection;
             }
             log.error("Dataset import failed for datasetId={}", dataset == null ? null : dataset.getId(), e);
             throw new ApiException(ErrorCode.INTERNAL_SERVER_ERROR, "Dataset import failed.", HttpStatus.INTERNAL_SERVER_ERROR);
         } finally {
             deleteQuietly(tempFile);
         }
+    }
+
+    /**
+     * Two rows of one file with the same area, serial number and voter id share a record key and violate the
+     * unique index of the new partition. That is a defect of the uploaded file, not a server fault.
+     */
+    private static ApiException duplicateRecordsRejection(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLException sql && "23505".equals(sql.getSQLState())) {
+                return new BadRequestException("The file contains duplicate voter records "
+                        + "(same area, serial number and voter id). Remove the duplicate rows and upload again.");
+            }
+            if (cause.getCause() == cause) {
+                break;
+            }
+        }
+        return null;
     }
 
     /** A superseded dataset must exist and still be IMPORTED; checked before the file is streamed. */
@@ -255,8 +280,17 @@ public class DatasetImportServiceImpl implements DatasetImportService {
         }));
     }
 
+    /** A file that is not a readable .xlsx package (plain text, truncated or corrupt zip) is a bad upload, not a fault. */
+    private static OPCPackage openWorkbook(Path file) throws IOException {
+        try {
+            return OPCPackage.open(file.toFile());
+        } catch (InvalidFormatException | NotOfficeXmlFileException | InvalidOperationException e) {
+            throw new BadRequestException("The file is not a valid .xlsx workbook.");
+        }
+    }
+
     private void streamXlsx(Path file, VoterSheetHandler rows) throws Exception {
-        try (OPCPackage opc = OPCPackage.open(file.toFile())) {
+        try (OPCPackage opc = openWorkbook(file)) {
             XSSFReader reader = new XSSFReader(opc);
             StylesTable styles = reader.getStylesTable();
             SharedStringsTable sharedStrings = (SharedStringsTable) reader.getSharedStringsTable();

@@ -199,6 +199,63 @@ class DatasetCopyImportIntegrationTest {
     }
 
     @Test
+    @DisplayName("Owner audit: a workbook with no importable rows (header only, or a required column missing) is rejected, not stored as an empty IMPORTED dataset")
+    void workbookWithoutImportableRowsIsRejected() throws IOException {
+        byte[] headerOnly = workbook(wb -> sheet(wb, "Voters", HEADER, List.of()));
+        byte[] noVoterIdColumn = workbook(wb -> sheet(wb, "Voters", new String[]{"state", "serial_no", "v_fname_en"},
+                List.<Object[]>of(new Object[]{"HARYANA", 1, "Asha"}, new Object[]{"HARYANA", 2, "Ravi"})));
+
+        for (byte[] bytes : List.of(headerOnly, noVoterIdColumn)) {
+            ApiException failure = assertThrows(ApiException.class, () -> importWorkbook("empty-" + bytes.length + ".xlsx", bytes));
+            assertEquals(ErrorCode.BAD_REQUEST, failure.getErrorCode());
+            assertTrue(failure.getMessage().contains("no importable voter rows"));
+        }
+
+        assertTrue(datasetRepository.findAll().stream().noneMatch(d -> d.getStatus() == DatasetStatus.IMPORTED),
+                "nothing may be left IMPORTED");
+        datasetRepository.findAll().forEach(d -> assertFalse(partitionExists(d.getId()), "partitions are dropped"));
+    }
+
+    @Test
+    @DisplayName("Owner audit: a present but non-numeric or negative area/serial number rejects that row with INVALID_NUMBER instead of importing it with NULL")
+    void invalidAreaNumbersRejectTheRow() throws IOException {
+        byte[] bytes = workbook(wb -> sheet(wb, "Voters", HEADER, List.<Object[]>of(
+                voter(1, "Good"),
+                new Object[]{"HARYANA", "GURGAON", "abc", 101, 1, 2, "EPIC2", "BadAc", "Kumar", "H-2", 30, null},
+                new Object[]{"HARYANA", "GURGAON", 10, -5, 1, 3, "EPIC3", "NegPart", "Kumar", "H-3", 30, null},
+                new Object[]{"HARYANA", "GURGAON", 10, 101, 1, "x1", "EPIC4", "BadSerial", "Kumar", "H-4", 30, null},
+                new Object[]{"HARYANA", "GURGAON", 10, 101, 1, 5, "EPIC5", "BigAc", "Kumar", "H-5", 99999999999L, null})));
+
+        DatasetDetailResponse response = importWorkbook("geo.xlsx", bytes);
+
+        // Only the row with an unusable geography/serial value is lost; a non-numeric age stays lenient (NULL).
+        assertEquals(5, response.getTotalRows());
+        assertEquals(2, response.getImportedRows());
+        assertEquals(3, response.getFailedRows());
+        assertEquals(List.of("ac_no", "part_no", "serial_no"),
+                response.getIssues().stream().map(i -> i.getColumnName()).sorted().toList());
+        assertTrue(response.getIssues().stream().allMatch(i -> "INVALID_NUMBER".equals(i.getIssueCode())));
+        assertTrue(response.getIssues().stream().noneMatch(i -> i.getIssueDetail().contains("abc") || i.getIssueDetail().contains("x1")),
+                "issues carry positions only, never cell values");
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + response.getId() + " WHERE ac_no IS NULL OR part_no IS NULL OR serial_no IS NULL", Integer.class));
+    }
+
+    @Test
+    @DisplayName("Owner audit: a file named .xlsx that is not a workbook is a 400, not a 500")
+    void fakeXlsxIsABadRequest() {
+        byte[] notAWorkbook = "this is plain text pretending to be xlsx".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        ApiException failure = assertThrows(ApiException.class, () -> importWorkbook("fake.xlsx", notAWorkbook));
+
+        assertEquals(ErrorCode.BAD_REQUEST, failure.getErrorCode());
+        assertEquals("The file is not a valid .xlsx workbook.", failure.getMessage());
+        datasetRepository.findAll().forEach(d -> {
+            assertEquals(DatasetStatus.FAILED, d.getStatus());
+            assertFalse(partitionExists(d.getId()));
+        });
+    }
+
+    @Test
     @DisplayName("COPY import: every sheet is loaded, whatever its column order, and rejected rows are reported with their sheet")
     void multipleSheetsAreLoadedAndIssuesNameTheSheet() throws IOException {
         String[] shuffled = {"voter_id", "serial_no", "state", "v_fname_en", "district"};
@@ -234,8 +291,11 @@ class DatasetCopyImportIntegrationTest {
 
         ApiException failure = assertThrows(ApiException.class, () -> importWorkbook("duplicate.xlsx", bytes));
 
-        assertEquals(ErrorCode.INTERNAL_SERVER_ERROR, failure.getErrorCode());
-        assertEquals("Dataset import failed.", failure.getMessage(), "no database detail is returned to the client");
+        // Owner audit batch 1: a duplicate record inside the file is a defect of the upload (400), not a server fault (500).
+        assertEquals(ErrorCode.BAD_REQUEST, failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("duplicate voter records"));
+        assertFalse(failure.getMessage().contains("voter_d") || failure.getMessage().toLowerCase().contains("violates"),
+                "no database detail is returned to the client");
         List<Dataset> datasets = datasetRepository.findAll();
         assertEquals(1, datasets.size());
         assertEquals(DatasetStatus.FAILED, datasets.get(0).getStatus());

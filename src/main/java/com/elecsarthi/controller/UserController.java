@@ -74,8 +74,8 @@ public class UserController {
     @GetMapping("/users/{id}")
     @PreAuthorize("hasAnyRole('OWNER', 'SUBOWNER')")
     @Operation(summary = "Get user details")
-    public ResponseEntity<UserDetailResponse> getUser(@PathVariable Long id) {
-        return ResponseEntity.ok(userService.getUser(id));
+    public ResponseEntity<UserDetailResponse> getUser(@PathVariable Long id, @AuthenticationPrincipal ElecSarthiUserPrincipal principal) {
+        return ResponseEntity.ok(userService.getUser(id, principal.getUserId(), principal.getRole()));
     }
 
     @PatchMapping("/users/{id}/status")

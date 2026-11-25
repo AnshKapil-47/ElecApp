@@ -2,6 +2,7 @@ package com.elecsarthi.security.config;
 
 import java.util.Locale;
 import com.elecsarthi.config.AppProperties;
+import com.elecsarthi.exception.common.BadRequestException;
 import com.elecsarthi.security.filter.DeviceSignatureFilter;
 import com.elecsarthi.security.filter.JwtAuthenticationFilter;
 import jakarta.annotation.PostConstruct;
@@ -21,6 +22,7 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
 import java.util.List;
 
@@ -28,6 +30,8 @@ import java.util.List;
 @EnableWebSecurity
 @EnableMethodSecurity
 public class SecurityConfig {
+
+    private static final int BCRYPT_MAX_PASSWORD_BYTES = 72;
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
     private final DeviceSignatureFilter deviceSignatureFilter;
@@ -135,7 +139,17 @@ public class SecurityConfig {
 
     @Bean
     public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder(12);
+        // BCrypt only uses the first 72 bytes and the library throws for more; turn that into a client error (400)
+        // at the one place every new or reset password is hashed, instead of a 500.
+        return new BCryptPasswordEncoder(12) {
+            @Override
+            protected String encodeNonNullPassword(String rawPassword) {
+                if (rawPassword.getBytes(StandardCharsets.UTF_8).length > BCRYPT_MAX_PASSWORD_BYTES) {
+                    throw new BadRequestException("Password must be at most " + BCRYPT_MAX_PASSWORD_BYTES + " bytes long.");
+                }
+                return super.encodeNonNullPassword(rawPassword);
+            }
+        };
     }
 
     @Bean
