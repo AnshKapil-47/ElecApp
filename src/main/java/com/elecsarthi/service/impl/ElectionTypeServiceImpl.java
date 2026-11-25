@@ -17,8 +17,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.elecsarthi.enums.FieldUsage;
+import com.elecsarthi.enums.FieldValueType;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -72,41 +75,41 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
     public CascadingFilterOptionResponse getCascadingFilterOptions(String codeOrId, String targetField, Map<String, String> parentFilters) {
         ElectionType electionType = resolveElectionType(codeOrId);
 
-        // Verify targetField is a valid column for this election type
-        ElectionTypeField targetDef = fieldRepository.findByElectionTypeIdAndSourceColumn(electionType.getId(), targetField.trim().toLowerCase(Locale.ROOT))
-                .orElseThrow(() -> new BadRequestException("Invalid target field: " + targetField));
+        // Every column (target and all narrowing filters) is validated against trusted metadata BEFORE any
+        // voter SQL exists. Only FILTER columns and the type's guard column are allowed; the SQL identifiers
+        // below come from that metadata, never from the request.
+        Map<String, FieldValueType> allowed = allowedFilterColumns(electionType);
 
-        String safeTargetColumn = targetDef.getSourceColumn();
+        String safeTargetColumn = requireAllowedColumn(allowed, targetField);
 
-        StringBuilder sql = new StringBuilder("SELECT DISTINCT ")
-                .append(safeTargetColumn)
-                .append(" FROM voter WHERE dataset_id IN (SELECT id FROM dataset WHERE status = 'IMPORTED')");
-
-        List<Object> params = new ArrayList<>();
-
-        if (parentFilters != null && !parentFilters.isEmpty()) {
+        record Narrowing(String column, Object value) { }
+        List<Narrowing> narrowings = new ArrayList<>();
+        if (parentFilters != null) {
             for (Map.Entry<String, String> entry : parentFilters.entrySet()) {
-                String parentCol = entry.getKey().trim().toLowerCase(Locale.ROOT);
+                String parentCol = requireAllowedColumn(allowed, entry.getKey());
                 String parentVal = entry.getValue();
 
                 if (parentVal == null || parentVal.isBlank()) continue;
 
-                // Validate parentCol against election_type_field
-                ElectionTypeField parentDef = fieldRepository.findByElectionTypeIdAndSourceColumn(electionType.getId(), parentCol)
-                        .orElseThrow(() -> new BadRequestException("Invalid parent field: " + parentCol));
-
-                sql.append(" AND ").append(parentDef.getSourceColumn()).append(" = ?");
-
-                if (parentDef.getValueType() == com.elecsarthi.enums.FieldValueType.INT) {
+                if (allowed.get(parentCol) == FieldValueType.INT) {
                     try {
-                        params.add(Integer.parseInt(parentVal.trim()));
+                        narrowings.add(new Narrowing(parentCol, Integer.parseInt(parentVal.trim())));
                     } catch (NumberFormatException e) {
-                        throw new BadRequestException("Parent field " + parentCol + " must be an integer");
+                        throw new BadRequestException("A numeric filter value is not a valid integer");
                     }
                 } else {
-                    params.add(parentVal.trim());
+                    narrowings.add(new Narrowing(parentCol, parentVal.trim()));
                 }
             }
+        }
+
+        StringBuilder sql = new StringBuilder("SELECT DISTINCT ")
+                .append(safeTargetColumn)
+                .append(" FROM voter WHERE dataset_id IN (SELECT id FROM dataset WHERE status = 'IMPORTED')");
+        List<Object> params = new ArrayList<>();
+        for (Narrowing n : narrowings) {
+            sql.append(" AND ").append(n.column()).append(" = ?");
+            params.add(n.value());
         }
 
         sql.append(" AND ").append(safeTargetColumn).append(" IS NOT NULL ORDER BY ").append(safeTargetColumn).append(" ASC LIMIT 500");
@@ -117,6 +120,36 @@ public class ElectionTypeServiceImpl implements ElectionTypeService {
                 .targetField(safeTargetColumn)
                 .values(distinctValues)
                 .build();
+    }
+
+    /**
+     * The only columns the sale-form cascade may read or narrow by: the election type's FILTER fields plus its
+     * guard column (which may be a DISPLAY field). Keys are lower-case source columns from trusted metadata.
+     */
+    private Map<String, FieldValueType> allowedFilterColumns(ElectionType electionType) {
+        Map<String, FieldValueType> allowed = new HashMap<>();
+        for (ElectionTypeField f : fieldRepository.findByElectionTypeIdAndUsageOrderByFilterOrderAsc(
+                electionType.getId(), FieldUsage.FILTER)) {
+            allowed.put(f.getSourceColumn().toLowerCase(Locale.ROOT), f.getValueType());
+        }
+        String guard = electionType.getGuardColumn();
+        if (guard != null && !guard.isBlank()) {
+            String guardCol = guard.toLowerCase(Locale.ROOT);
+            FieldValueType type = fieldRepository.findByElectionTypeIdAndSourceColumn(electionType.getId(), guardCol)
+                    .map(ElectionTypeField::getValueType).orElse(FieldValueType.TEXT);
+            allowed.putIfAbsent(guardCol, type);
+        }
+        return allowed;
+    }
+
+    /** Returns the metadata-owned column name, or rejects. The message never says whether the column exists. */
+    private String requireAllowedColumn(Map<String, FieldValueType> allowed, String requested) {
+        String normalized = requested == null ? "" : requested.trim().toLowerCase(Locale.ROOT);
+        if (!allowed.containsKey(normalized)) {
+            throw new BadRequestException("Unsupported filter field");
+        }
+        // containsKey matched exactly, so this equals a metadata-owned key, never free-form caller text.
+        return normalized;
     }
 
     private ElectionType resolveElectionType(String codeOrId) {
