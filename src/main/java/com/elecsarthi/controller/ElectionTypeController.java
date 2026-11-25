@@ -48,8 +48,8 @@ public class ElectionTypeController {
     }
 
     @GetMapping("/{codeOrId}/filters")
-    @PreAuthorize("isAuthenticated()")
-    @Operation(summary = "Query available distinct values for cascading filters")
+    @PreAuthorize("hasAnyRole('OWNER', 'SUBOWNER', 'AGENT')")
+    @Operation(summary = "Query available distinct values for cascading sale-form filters (Owner, Subowner, Agent only)")
     public ResponseEntity<CascadingFilterOptionResponse> getFilterValues(
             @PathVariable String codeOrId,
             @RequestParam("target") String targetField,
