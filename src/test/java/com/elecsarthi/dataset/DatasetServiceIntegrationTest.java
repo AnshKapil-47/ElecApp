@@ -561,7 +561,7 @@ public class DatasetServiceIntegrationTest {
     }
 
     @Test
-    @DisplayName("Dataset import: rows without voter_id are counted as failed and recorded as issues")
+    @DisplayName("Dataset import: rows without voter_id are still imported and recorded as issues")
     void testRowMissingRequiredFieldRecordedAsIssue() throws IOException {
         byte[] bytes;
         try (XSSFWorkbook workbook = new XSSFWorkbook(); ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
@@ -587,9 +587,10 @@ public class DatasetServiceIntegrationTest {
         DatasetDetailResponse resp = datasetImportService.importDataset(
                 xlsx("partial.xlsx", bytes), masterRequest("Partial", null), owner.getId());
 
-        assertEquals(1, resp.getImportedRows());
-        assertEquals(1, resp.getFailedRows());
+        assertEquals(2, resp.getImportedRows());
+        assertEquals(0, resp.getFailedRows());
         assertEquals(1, resp.getIssues().size());
-        assertEquals("MISSING_REQUIRED_FIELD", resp.getIssues().get(0).getIssueCode());
+        assertEquals("MISSING_FIELD", resp.getIssues().get(0).getIssueCode());
+        assertEquals("voter_id", resp.getIssues().get(0).getColumnName());
     }
 }

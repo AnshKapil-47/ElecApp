@@ -125,7 +125,7 @@ public class DatasetImportServiceImpl implements DatasetImportService {
             VoterSheetHandler rows = copyRows(tempFile, datasetId, now);
             if (rows.importedRows() == 0) {
                 throw new BadRequestException("The file contains no importable voter rows. Check that the first row holds "
-                        + "the column headers (including state, voter_id and serial_no) and that the rows are filled in.");
+                        + "the column headers and that the rows below it are filled in.");
             }
 
             rejectOverlap(datasetId, request.getStorageTier(), request.getSupersedesDatasetId());

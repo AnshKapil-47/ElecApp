@@ -197,17 +197,13 @@ class DatasetCopyImportIntegrationTest {
     }
 
     @Test
-    @DisplayName("Owner audit: a workbook with no importable rows (header only, or a required column missing) is rejected, not stored as an empty IMPORTED dataset")
+    @DisplayName("A workbook with no data rows is rejected, not stored as an empty IMPORTED dataset")
     void workbookWithoutImportableRowsIsRejected() throws IOException {
         byte[] headerOnly = workbook(wb -> sheet(wb, "Voters", HEADER, List.of()));
-        byte[] noVoterIdColumn = workbook(wb -> sheet(wb, "Voters", new String[]{"state", "serial_no", "v_fname_en"},
-                List.<Object[]>of(new Object[]{"HARYANA", 1, "Asha"}, new Object[]{"HARYANA", 2, "Ravi"})));
 
-        for (byte[] bytes : List.of(headerOnly, noVoterIdColumn)) {
-            ApiException failure = assertThrows(ApiException.class, () -> importWorkbook("empty-" + bytes.length + ".xlsx", bytes));
-            assertEquals(ErrorCode.BAD_REQUEST, failure.getErrorCode());
-            assertTrue(failure.getMessage().contains("no importable voter rows"));
-        }
+        ApiException failure = assertThrows(ApiException.class, () -> importWorkbook("empty.xlsx", headerOnly));
+        assertEquals(ErrorCode.BAD_REQUEST, failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("no importable voter rows"));
 
         assertTrue(datasetRepository.findAll().stream().noneMatch(d -> d.getStatus() == DatasetStatus.IMPORTED),
                 "nothing may be left IMPORTED");
@@ -215,8 +211,28 @@ class DatasetCopyImportIntegrationTest {
     }
 
     @Test
-    @DisplayName("Owner audit: a present but non-numeric or negative area/serial number rejects that row with INVALID_NUMBER instead of importing it with NULL")
-    void invalidAreaNumbersRejectTheRow() throws IOException {
+    @DisplayName("A sheet without any voter_id column (and with misspelled PRISHAD headers) still imports every row")
+    void sheetWithoutVoterIdColumnImportsEveryRow() throws IOException {
+        byte[] bytes = workbook(wb -> sheet(wb, "Voters", new String[]{"state", "serial_no", "v_fname_en", "NAGAR_PRISHAD_WARD_NO"},
+                List.<Object[]>of(new Object[]{"HARYANA", 1, "Asha", 7}, new Object[]{"HARYANA", 1, "Ravi", 7},
+                        new Object[]{"HARYANA", 2, "Mina", 8})));
+
+        DatasetDetailResponse response = importWorkbook("no-voter-id.xlsx", bytes);
+
+        assertEquals(DatasetStatus.IMPORTED, response.getStatus());
+        assertEquals(3, response.getImportedRows());
+        assertEquals(0, response.getFailedRows());
+        String table = "voter_d" + response.getId();
+        assertEquals(3, jdbcTemplate.queryForObject("SELECT count(*) FROM " + table + " WHERE voter_id IS NULL", Integer.class));
+        assertEquals(3, jdbcTemplate.queryForObject("SELECT count(DISTINCT source_record_key_hash) FROM " + table, Integer.class),
+                "the repeated serial number gets its own record key");
+        assertEquals(2, jdbcTemplate.queryForObject("SELECT count(*) FROM " + table + " WHERE nagar_parishad_ward_no = 7", Integer.class),
+                "the PRISHAD spelling is mapped to the PARISHAD column");
+    }
+
+    @Test
+    @DisplayName("Owner audit: a present but non-numeric or negative area/serial number is imported as NULL and reported as INVALID_NUMBER")
+    void invalidAreaNumbersAreStoredAsNull() throws IOException {
         byte[] bytes = workbook(wb -> sheet(wb, "Voters", HEADER, List.<Object[]>of(
                 voter(1, "Good"),
                 new Object[]{"HARYANA", "GURGAON", "abc", 101, 1, 2, "EPIC2", "BadAc", "Kumar", "H-2", 30, null},
@@ -226,16 +242,17 @@ class DatasetCopyImportIntegrationTest {
 
         DatasetDetailResponse response = importWorkbook("geo.xlsx", bytes);
 
-        // Only the row with an unusable geography/serial value is lost; a non-numeric age stays lenient (NULL).
+        // Every row is imported; an unusable geography/serial value is stored as NULL and reported. Age stays lenient.
         assertEquals(5, response.getTotalRows());
-        assertEquals(2, response.getImportedRows());
-        assertEquals(3, response.getFailedRows());
+        assertEquals(5, response.getImportedRows());
+        assertEquals(0, response.getFailedRows());
         assertEquals(List.of("ac_no", "part_no", "serial_no"),
                 response.getIssues().stream().map(i -> i.getColumnName()).sorted().toList());
         assertTrue(response.getIssues().stream().allMatch(i -> "INVALID_NUMBER".equals(i.getIssueCode())));
         assertTrue(response.getIssues().stream().noneMatch(i -> i.getIssueDetail().contains("abc") || i.getIssueDetail().contains("x1")),
                 "issues carry positions only, never cell values");
-        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + response.getId() + " WHERE ac_no IS NULL OR part_no IS NULL OR serial_no IS NULL", Integer.class));
+        assertEquals(5, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + response.getId(), Integer.class));
+        assertEquals(3, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + response.getId() + " WHERE ac_no IS NULL OR part_no IS NULL OR serial_no IS NULL", Integer.class));
     }
 
     @Test
@@ -267,14 +284,39 @@ class DatasetCopyImportIntegrationTest {
 
         DatasetDetailResponse response = importWorkbook("sheets.xlsx", bytes);
 
-        assertEquals(4, response.getImportedRows());
-        assertEquals(1, response.getFailedRows());
+        assertEquals(5, response.getImportedRows());
+        assertEquals(0, response.getFailedRows());
         assertEquals(5, response.getTotalRows());
         assertEquals(1, response.getIssues().size());
+        assertEquals("MISSING_FIELD", response.getIssues().get(0).getIssueCode());
         assertEquals("Sheet2", response.getIssues().get(0).getSheet());
         assertEquals("HISAR", jdbcTemplate.queryForObject(
                 "SELECT district FROM voter_d" + response.getId() + " WHERE serial_no = 3", String.class));
-        assertEquals(4, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + response.getId(), Integer.class));
+        assertEquals(5, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + response.getId(), Integer.class));
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM voter_d" + response.getId() + " WHERE voter_id IS NULL AND v_fname_en = 'NoVoterId'", Integer.class));
+    }
+
+    @Test
+    @DisplayName("COPY import: a repeated record is kept as its own row and reported, never failing the import")
+    void repeatedRecordIsKept() throws IOException {
+        java.util.List<Object[]> rows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 3_000; i++) {
+            rows.add(voter(i, "Voter" + i));
+        }
+        rows.add(voter(1_500, "DuplicateOf1500")); // same record key twice
+        byte[] bytes = workbook(wb -> sheet(wb, "Voters", HEADER, rows));
+
+        DatasetDetailResponse response = importWorkbook("duplicate.xlsx", bytes);
+
+        assertEquals(DatasetStatus.IMPORTED, response.getStatus());
+        assertEquals(3_001, response.getImportedRows());
+        assertEquals(0, response.getFailedRows());
+        assertEquals(3_001, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + response.getId(), Integer.class));
+        assertEquals(3_001, jdbcTemplate.queryForObject(
+                "SELECT count(DISTINCT source_record_key_hash) FROM voter_d" + response.getId(), Integer.class));
+        assertEquals(1, response.getIssues().size());
+        assertEquals("DUPLICATE_RECORD", response.getIssues().get(0).getIssueCode());
     }
 
     @Test
@@ -284,26 +326,20 @@ class DatasetCopyImportIntegrationTest {
         for (int i = 1; i <= 3_000; i++) {
             rows.add(voter(i, "Voter" + i));
         }
-        rows.add(voter(1_500, "DuplicateOf1500")); // same record key twice: the unique key rejects it during COPY
         byte[] bytes = workbook(wb -> sheet(wb, "Voters", HEADER, rows));
+        // Force a failure after rows were streamed: the same file imported twice is refused, so use a broken package.
+        byte[] truncated = java.util.Arrays.copyOf(bytes, bytes.length / 2);
 
-        ApiException failure = assertThrows(ApiException.class, () -> importWorkbook("duplicate.xlsx", bytes));
+        assertThrows(ApiException.class, () -> importWorkbook("truncated.xlsx", truncated));
 
-        // Owner audit batch 1: a duplicate record inside the file is a defect of the upload (400), not a server fault (500).
-        assertEquals(ErrorCode.BAD_REQUEST, failure.getErrorCode());
-        assertTrue(failure.getMessage().contains("duplicate voter records"));
-        assertFalse(failure.getMessage().contains("voter_d") || failure.getMessage().toLowerCase().contains("violates"),
-                "no database detail is returned to the client");
         List<Dataset> datasets = datasetRepository.findAll();
-        assertEquals(1, datasets.size());
-        assertEquals(DatasetStatus.FAILED, datasets.get(0).getStatus());
-        assertFalse(partitionExists(datasets.get(0).getId()), "the partition must be dropped");
+        assertTrue(datasets.stream().noneMatch(d -> d.getStatus() == DatasetStatus.IMPORTED));
+        datasets.forEach(d -> assertFalse(partitionExists(d.getId()), "the partition must be dropped"));
         assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM voter", Integer.class), "no row of the failed load remains");
         assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM import_issue", Integer.class));
 
-        // The failed file does not lock itself out: a corrected file imports normally.
-        rows.remove(rows.size() - 1);
-        DatasetDetailResponse retried = importWorkbook("corrected.xlsx", workbook(wb -> sheet(wb, "Voters", HEADER, rows)));
+        // The failed file does not lock itself out: the intact file imports normally.
+        DatasetDetailResponse retried = importWorkbook("corrected.xlsx", bytes);
         assertEquals(DatasetStatus.IMPORTED, retried.getStatus());
         assertEquals(3_000, retried.getImportedRows());
         assertTrue(partitionExists(retried.getId()));
