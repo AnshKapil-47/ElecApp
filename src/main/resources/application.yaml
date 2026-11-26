@@ -2,7 +2,7 @@ spring:
   application:
     name: elecsarthi-backend
   profiles:
-    active: dev
+    active: test
   servlet:
     multipart:
       max-file-size: 200MB
