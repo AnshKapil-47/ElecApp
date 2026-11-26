@@ -272,6 +272,8 @@ SELECT pg_temp.accept($$UPDATE agent_sale SET void_reason = 'typo (confirmed)' W
 SELECT pg_temp.reject($$INSERT INTO election_type_field (election_type_id, source_column, value_type, label_en, usage, display_order)
   VALUES (1,'mobile_no','TEXT','x','DISPLAY',99)$$, 'runtime role changes the field configuration');
 SELECT pg_temp.reject($$DROP TABLE voter_d1$$, 'runtime role drops voter data');
+SELECT pg_temp.accept($$DELETE FROM entitlement WHERE id = -1$$, 'runtime role removes entitlements when a dataset is deleted');
+SELECT pg_temp.reject($$DELETE FROM agent_sale_line WHERE id = -1$$, 'runtime role deletes sale history');
 RESET ROLE;
 
 -- ---------- partition management validation (SECURITY DEFINER) ----------

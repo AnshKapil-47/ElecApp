@@ -211,22 +211,11 @@ class SubownerWorkflowSecurityIntegrationTest extends SecurityIntegrationTestSup
 
         byte[] fake = "plain text pretending to be xlsx".getBytes();
         byte[] headerOnly = workbook(PANCHAYAT_HEADER, List.of());
-        byte[] noVoterId = workbook(new String[] {"state", "district", "panchayat_no", "serial_no"},
-                List.<Object[]>of(new Object[] {"X STATE", "D", 1, 1}));
-        List<Object[]> dup = panchayatRows("DUP", 2, "NEG STATE A");
-        dup.set(1, dup.get(0));
-        byte[] exactDuplicate = workbook(PANCHAYAT_HEADER, dup);
-        List<Object[]> badGeo = panchayatRows("GEO", 3, "NEG STATE B");
-        badGeo.forEach(r -> r[2] = "ZZ");
-        byte[] invalidGeography = workbook(PANCHAYAT_HEADER, badGeo);
 
         upload(subownerToken, "fake.xlsx", fake, "N1", "PANCHAYAT").andExpect(status().isBadRequest());
         upload(subownerToken, "empty.xlsx", new byte[0], "N2", "PANCHAYAT").andExpect(status().isBadRequest());
         upload(subownerToken, "rows.csv", fake, "N3", "PANCHAYAT").andExpect(status().isBadRequest());
         upload(subownerToken, "header.xlsx", headerOnly, "N4", "PANCHAYAT").andExpect(status().isBadRequest());
-        upload(subownerToken, "novoter.xlsx", noVoterId, "N5", "PANCHAYAT").andExpect(status().isBadRequest());
-        upload(subownerToken, "dup.xlsx", exactDuplicate, "N6", "PANCHAYAT").andExpect(status().isBadRequest());
-        upload(subownerToken, "geo.xlsx", invalidGeography, "N7", "PANCHAYAT").andExpect(status().isBadRequest());
         upload(subownerToken, "etype.xlsx", headerOnly, "N8", "NOT_A_TYPE").andExpect(status().isBadRequest());
 
         assertEquals(List.of(goodId), datasetRepository.findAll().stream().filter(d -> d.getStatus() == DatasetStatus.IMPORTED).map(d -> d.getId()).toList());
@@ -237,6 +226,27 @@ class SubownerWorkflowSecurityIntegrationTest extends SecurityIntegrationTestSup
             assertFalse(Boolean.TRUE.equals(jdbcTemplate.queryForObject("SELECT to_regclass('public.voter_d" + d.getId() + "') IS NOT NULL", Boolean.class)));
         });
         assertEquals(4, voterRows(goodId));
+    }
+
+    @Test
+    @DisplayName("Refined files import completely: a missing voter id column, a repeated record and a non-numeric number never reject a row")
+    void incompleteButRefinedFilesImportEveryRow() throws Exception {
+        byte[] noVoterId = workbook(new String[] {"state", "district", "panchayat_no", "serial_no"},
+                List.<Object[]>of(new Object[] {"X STATE", "D", 1, 1}));
+        List<Object[]> dup = panchayatRows("DUP", 2, "NEG STATE A");
+        dup.set(1, dup.get(0));
+        byte[] exactDuplicate = workbook(PANCHAYAT_HEADER, dup);
+        List<Object[]> badGeo = panchayatRows("GEO", 3, "NEG STATE B");
+        badGeo.forEach(r -> r[2] = "ZZ");
+        byte[] invalidGeography = workbook(PANCHAYAT_HEADER, badGeo);
+
+        upload(subownerToken, "novoter.xlsx", noVoterId, "R1", "PANCHAYAT").andExpect(status().isCreated());
+        upload(subownerToken, "dup.xlsx", exactDuplicate, "R2", "PANCHAYAT").andExpect(status().isCreated());
+        upload(subownerToken, "geo.xlsx", invalidGeography, "R3", "PANCHAYAT").andExpect(status().isCreated());
+
+        assertEquals(3, datasetRepository.findAll().stream().filter(d -> d.getStatus() == DatasetStatus.IMPORTED).count());
+        assertEquals(1 + 2 + 3, jdbcTemplate.queryForObject("SELECT count(*) FROM voter", Integer.class), "every row of every file is stored");
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT sum(failed_rows) FROM dataset", Integer.class));
     }
 
     @Test

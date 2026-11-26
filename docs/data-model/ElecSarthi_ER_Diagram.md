@@ -11,8 +11,10 @@ Version 1.0 · 24 November 2026 · designed from the business rules, not from ea
 | `…/V4__canonical_customer_role.sql` | Align existing persisted role values to canonical role `CUSTOMER` |
 | `…/V5__remove_legacy_customer_admin_role.sql` | Enforce 5 canonical roles, replace index with `ux_one_customer_primary_login`, and drop legacy triggers |
 | `…/V6__harden_security_definer_partition_functions.sql` | Harden SECURITY DEFINER partition functions (fixed search_path, input validation, revoke from PUBLIC) |
+| `…/V7__audit_log_optimization_indexes.sql` | Two partial indexes on `audit_log` for registration-token and mobile-switch lookups |
+| `…/V8__runtime_role_delete_entitlement.sql` | Lets the runtime role DELETE `entitlement`, needed to remove a dataset and its entitlements after the election |
 | `election_type_field_seed.csv` | 271 field rows generated from the colours of `NEW_APP_COLUMN_DETAILS.xlsx` |
-| `tools/db/test_schema.sql`, `tools/db/run_tests.sh` | 83 business-rule checks, all passing on PostgreSQL 18.3 |
+| `tools/db/test_schema.sql`, `tools/db/run_tests.sh` | 85 business-rule checks, all passing on PostgreSQL 18.3 |
 | `tools/seed/gen_seed.py`, `tools/erd/gen_erd.py`, `tools/erd/verify_ends.py` | Regenerate the seed and the diagram, and check the diagram's line ends |
 
 ---
@@ -256,7 +258,7 @@ PENDING ──(rows loaded, no overlap)──► IMPORTED ──(newer roll supe
   - MASTER: import + 60 days, and a MASTER entitlement can never run past it.
   - LONG_TERM: recomputed on every sale, void and revoke as the latest entitlement end + 30 days.
 
-**`import_issue`**: up to 200 problems per import, with codes such as `BAD_NUMBER`, `DUPLICATE_EPIC`, `OVERLAP` and `AMBIGUOUS_AREA`. Only positions (sheet, row, column) are stored, never personal values.
+**`import_issue`**: up to 200 notes per import, with codes `MISSING_FIELD` (state, voter id or serial number empty), `INVALID_NUMBER` (an area or serial number that is not a whole number, stored as NULL), `DUPLICATE_RECORD` (a record repeating an earlier row) and `ENCRYPTION_FAILED`. They are informational: **no row is ever rejected**, every data row of the file is imported. Only positions (sheet, row, column) are stored, never personal values.
 
 **`voter`**: the roll. `PARTITION BY LIST (dataset_id)`: each dataset is its own physical table (`voter_d<id>`). Deleting a dataset is `DETACH` + `DROP`, which is instant and leaves no bloat.
 - `id` comes from one global sequence. The API addresses a voter as **`(entitlement_id, voter_ref = voter.id)`**. It never sends `dataset_id` or EPIC as a key.
@@ -440,15 +442,17 @@ LIMIT :page_size OFFSET :offset;               -- page_size <= 100
 
 1. **Database:**
    1. PostgreSQL 18.3 with `btree_gist`, `pg_trgm` and `citext`.
-   2. Flyway applies the six sequential migrations from `src/main/resources/db/migration/`:
+   2. Flyway applies the eight sequential migrations from `src/main/resources/db/migration/`:
       - `V1__elecsarthi_schema.sql`: Core 18 tables, partitions, exclusion constraints, triggers, and functions.
       - `V2__runtime_role.sql`: Grants for application runtime role `elecsarthi_app`.
       - `V3__seed_election_type_field.sql`: 271 field metadata mappings for 8 election lenses.
       - `V4__canonical_customer_role.sql`: Aligns persisted role values to canonical role `CUSTOMER`.
       - `V5__remove_legacy_customer_admin_role.sql`: Enforces 5 canonical roles, replaces index with `ux_one_customer_primary_login`, and drops legacy triggers.
       - `V6__harden_security_definer_partition_functions.sql`: Hardens SECURITY DEFINER partition lifecycle functions with pinned `search_path`, strict validation, and restricted permissions.
+      - `V7__audit_log_optimization_indexes.sql`: Partial indexes on `audit_log`.
+      - `V8__runtime_role_delete_entitlement.sql`: Grants DELETE on `entitlement` to `elecsarthi_app` so a dataset can be deleted together with its entitlements.
    3. To fill `label_mt` or change `on_slip`, follow the `/seed-fields` skill (it creates a new reseed migration).
-   4. Run `tools/db/run_tests.sh` or `tools/db/test_schema.sql` on every schema change (83/83 checks passing).
+   4. Run `tools/db/run_tests.sh` or `tools/db/test_schema.sql` on every schema change (85/85 checks passing).
 2. **Backend:** Java 25 LTS, Spring Boot 4.2.0, Spring Security, Spring Data JPA, Flyway, Apache POI streaming.
    The backend adheres to a mandatory centralized layered architecture under `com.elecsarthi`:
    - `com.elecsarthi.controller`: REST API controllers.

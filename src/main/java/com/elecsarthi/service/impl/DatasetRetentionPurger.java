@@ -26,6 +26,7 @@ public class DatasetRetentionPurger {
     private final EntitlementRepository entitlementRepository;
     private final AuditService auditService;
     private final JdbcTemplate jdbcTemplate;
+    private final DatasetEraser datasetEraser;
 
     /**
      * Purges a single expired dataset in its own isolated transaction.
@@ -73,14 +74,10 @@ public class DatasetRetentionPurger {
                 Map.of("name", ds.getName(), "tier", ds.getStorageTier().name(), "deleteAfter", ds.getDeleteAfter().toString()),
                 null);
 
-        // Mark status in metadata to DELETING
-        ds.setStatus(DatasetStatus.DELETING);
-        datasetRepository.saveAndFlush(ds);
+        // Remove the voters, everything that depends on the dataset, and the dataset row itself.
+        datasetEraser.erase(ds);
 
-        // Drop database partitions
-        jdbcTemplate.execute("SELECT detach_and_drop_dataset_partitions(" + ds.getId() + "::bigint);");
-
-        log.info("Successfully dropped partitions and marked DELETING for dataset {}", ds.getId());
+        log.info("Successfully deleted expired dataset {}", ds.getId());
         return true;
     }
 }

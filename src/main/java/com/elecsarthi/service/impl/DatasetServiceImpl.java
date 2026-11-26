@@ -48,6 +48,7 @@ public class DatasetServiceImpl implements DatasetService {
     private final AuditService auditService;
     private final DatasetMapper datasetMapper;
     private final JdbcTemplate jdbcTemplate;
+    private final DatasetEraser datasetEraser;
     private final Clock clock;
 
     @Override
@@ -99,20 +100,13 @@ public class DatasetServiceImpl implements DatasetService {
                     "Cannot delete dataset. Unexpired offline leases exist for this dataset.");
         }
 
-        dataset.setStatus(DatasetStatus.DELETING);
-        datasetRepository.saveAndFlush(dataset);
-
         try {
-            jdbcTemplate.execute("SELECT detach_and_drop_dataset_partitions(" + id + "::bigint);");
-        } catch (Exception e) {
-            log.error("Failed to detach and drop partitions for dataset {}", id, e);
+            datasetEraser.erase(dataset);
+        } catch (RuntimeException e) {
+            log.error("Failed to delete dataset {}", id, e);
             throw new ApiException(ErrorCode.INTERNAL_SERVER_ERROR,
-                    "Failed to drop partitions for dataset.", HttpStatus.INTERNAL_SERVER_ERROR);
+                    "Failed to delete dataset.", HttpStatus.INTERNAL_SERVER_ERROR);
         }
-
-        jdbcTemplate.update("DELETE FROM import_issue WHERE dataset_id = ?", id);
-        datasetRepository.delete(dataset);
-        datasetRepository.flush();
 
         auditService.logDetails(callerUserId, null, id, null, "DATASET_DELETE", AuditOutcome.SUCCESS,
                 "dataset", id.toString(), Map.of("name", dataset.getName()), null);

@@ -5,11 +5,13 @@ import com.elecsarthi.dto.response.DatasetDetailResponse;
 import com.elecsarthi.dto.response.ElectionTypeFieldResponse;
 import com.elecsarthi.dto.response.ElectionTypeResponse;
 import com.elecsarthi.entity.AppUser;
+import com.elecsarthi.entity.BoothAssignment;
 import com.elecsarthi.entity.CustomerAccount;
 import com.elecsarthi.entity.Dataset;
 import com.elecsarthi.entity.ElectionType;
 import com.elecsarthi.entity.ElectionTypeField;
 import com.elecsarthi.entity.Entitlement;
+import com.elecsarthi.enums.BoothAssignmentStatus;
 import com.elecsarthi.enums.DatasetStatus;
 import com.elecsarthi.enums.DatasetTier;
 import com.elecsarthi.enums.ElectionTypeCode;
@@ -22,6 +24,7 @@ import com.elecsarthi.enums.UserStatus;
 import com.elecsarthi.exception.common.ApiException;
 import com.elecsarthi.exception.common.ConflictException;
 import com.elecsarthi.repository.AppUserRepository;
+import com.elecsarthi.repository.BoothAssignmentRepository;
 import com.elecsarthi.repository.CustomerAccountRepository;
 import com.elecsarthi.repository.DatasetRepository;
 import com.elecsarthi.repository.ElectionTypeFieldRepository;
@@ -88,6 +91,9 @@ public class DatasetServiceIntegrationTest {
 
     @Autowired
     private CustomerAccountRepository customerAccountRepository;
+
+    @Autowired
+    private BoothAssignmentRepository boothAssignmentRepository;
 
     @Autowired
     private AppUserRepository userRepository;
@@ -237,6 +243,78 @@ public class DatasetServiceIntegrationTest {
                 "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'voter_d" + datasetId + "')",
                 Boolean.class);
         assertFalse(tableExists != null && tableExists, "Partition table voter_d" + datasetId + " must be dropped");
+    }
+
+    @Test
+    @DisplayName("Dataset deletion after the election: expired entitlements and booth assignments are removed together with the dataset")
+    void testDatasetDeletionAfterElectionRemovesDependents() throws IOException {
+        Long datasetId = datasetImportService.importDataset(
+                xlsxFile("election_over.xlsx", createSampleVoterXlsx(3)), masterRequest("Election Over"), owner.getId()).getId();
+        Long otherDatasetId = datasetImportService.importDataset(
+                xlsxFile("still_running.xlsx", createSampleVoterXlsx(4)),
+                DatasetUploadRequest.builder().name("Still Running").storageTier(DatasetTier.LONG_TERM).build(), owner.getId()).getId();
+
+        CustomerAccount customer = customerAccountRepository.save(CustomerAccount.builder()
+                .customerName("Acme Corp")
+                .contactPhone("+919811122233")
+                .createdByUserId(owner.getId())
+                .status(UserStatus.ACTIVE)
+                .build());
+        AppUser subuser = userRepository.save(AppUser.builder()
+                .username("field_user").fullName("Field User").passwordHash("hashed")
+                .role(Role.SUBUSER).status(UserStatus.ACTIVE).customerAccountId(customer.getId()).build());
+
+        // After the election every entitlement on the dataset has run out; a booth assignment hangs on one of them.
+        Instant now = Instant.now();
+        Entitlement expiredOne = entitlement(customer, datasetId, DatasetTier.MASTER, (short) 2, 'a', now.minus(40, ChronoUnit.DAYS), now.minus(10, ChronoUnit.DAYS));
+        entitlement(customer, datasetId, DatasetTier.MASTER, (short) 3, 'b', now.minus(40, ChronoUnit.DAYS), now.minus(5, ChronoUnit.DAYS));
+        boothAssignmentRepository.save(BoothAssignment.builder()
+                .subuserId(subuser.getId()).customerAccountId(customer.getId()).entitlementId(expiredOne.getId())
+                .boothValue(7).slot((short) 1)
+                .validFrom(now.minus(12, ChronoUnit.DAYS)).validUntil(now.minus(10, ChronoUnit.DAYS))
+                .status(BoothAssignmentStatus.ACTIVE).assignedByUserId(owner.getId()).createdAt(now.minus(12, ChronoUnit.DAYS))
+                .build());
+        Entitlement unrelated = entitlement(customer, otherDatasetId, DatasetTier.LONG_TERM, (short) 2, 'c', now.minus(1, ChronoUnit.DAYS), now.plus(20, ChronoUnit.DAYS));
+
+        datasetService.deleteDataset(datasetId, owner.getId());
+
+        assertFalse(datasetRepository.findById(datasetId).isPresent(), "the dataset row is gone");
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM entitlement WHERE dataset_id = ?", Integer.class, datasetId));
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM booth_assignment", Integer.class));
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM import_issue WHERE dataset_id = ?", Integer.class, datasetId));
+        assertFalse(Boolean.TRUE.equals(jdbcTemplate.queryForObject(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'voter_d" + datasetId + "')", Boolean.class)),
+                "the voter partition is dropped");
+        assertTrue(datasetRepository.findById(otherDatasetId).isPresent(), "another dataset is untouched");
+        assertTrue(entitlementRepository.findById(unrelated.getId()).isPresent(), "another dataset's entitlement is untouched");
+        assertEquals(4, jdbcTemplate.queryForObject("SELECT count(*) FROM voter_d" + otherDatasetId, Integer.class));
+    }
+
+    private MockMultipartFile xlsxFile(String name, byte[] bytes) {
+        return new MockMultipartFile("file", name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes);
+    }
+
+    private DatasetUploadRequest masterRequest(String name) {
+        return DatasetUploadRequest.builder().name(name).storageTier(DatasetTier.MASTER).build();
+    }
+
+    private Entitlement entitlement(CustomerAccount customer, Long datasetId, DatasetTier tier, short electionTypeId,
+                                    char hashChar, Instant validFrom, Instant validUntil) {
+        return entitlementRepository.save(Entitlement.builder()
+                .customerAccountId(customer.getId())
+                .electionTypeId(electionTypeId)
+                .datasetId(datasetId)
+                .storageTier(tier)
+                .criteria("{\"ac_no\":10,\"state\":\"HARYANA\"}")
+                .criteriaHash(String.valueOf(hashChar).repeat(64))
+                .scopeLabel("HARYANA AC 10")
+                .source(EntitlementSource.DIRECT)
+                .status(EntitlementStatus.ACTIVE)
+                .validFrom(validFrom)
+                .validUntil(validUntil)
+                .createdByUserId(owner.getId())
+                .createdAt(validFrom)
+                .build());
     }
 
     @Test

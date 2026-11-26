@@ -125,8 +125,8 @@ public class RetentionSecurityIntegrationTest extends SecurityIntegrationTestSup
         );
         assertFalse(Boolean.TRUE.equals(partitionExistsAfter), "Partition table voter_d<id> must be detached and dropped");
 
-        Dataset purgedDs = datasetRepository.findById(masterDs.getId()).orElseThrow();
-        assertEquals(DatasetStatus.DELETING, purgedDs.getStatus());
+        assertTrue(datasetRepository.findById(masterDs.getId()).isEmpty(),
+                "The expired dataset must be gone entirely, not left behind as a DELETING row");
 
         // 5. Verify user session transitioned to TERMINATED
         UserSession updatedSession = sessionRepository.findById(expiredSession.getId()).orElseThrow();
@@ -257,8 +257,7 @@ public class RetentionSecurityIntegrationTest extends SecurityIntegrationTestSup
         lockHolderExecutor.shutdown();
 
         retentionScheduledService.runDatasetRetentionJob();
-        Dataset purgedContention = datasetRepository.findById(contentionDs.getId()).orElseThrow();
-        assertEquals(DatasetStatus.DELETING, purgedContention.getStatus(),
+        assertTrue(datasetRepository.findById(contentionDs.getId()).isEmpty(),
                 "After lock release, runDatasetRetentionJob must acquire lock 1001 and purge dataset");
 
         // 2. Failure releases advisory xact lock: throwing inside executeWithTransactionLock must rollback and release 1001L
@@ -281,8 +280,7 @@ public class RetentionSecurityIntegrationTest extends SecurityIntegrationTestSup
 
         // Subsequent runDatasetRetentionJob must acquire lock 1001L cleanly
         retentionScheduledService.runDatasetRetentionJob();
-        Dataset refreshedPostFail = datasetRepository.findById(postFailureDs.getId()).orElseThrow();
-        assertEquals(DatasetStatus.DELETING, refreshedPostFail.getStatus(),
+        assertTrue(datasetRepository.findById(postFailureDs.getId()).isEmpty(),
                 "Subsequent runDatasetRetentionJob must acquire lock after previous failure rolled back");
 
         // 3. Spring-managed REQUIRES_NEW isolation: failure on one dataset rolls back ONLY that dataset
@@ -325,12 +323,11 @@ public class RetentionSecurityIntegrationTest extends SecurityIntegrationTestSup
         }
 
         Dataset failedReloaded = datasetRepository.findById(failingDs.getId()).orElseThrow();
-        Dataset okReloaded = datasetRepository.findById(succeedingDs.getId()).orElseThrow();
 
         assertEquals(DatasetStatus.IMPORTED, failedReloaded.getStatus(),
                 "Failed dataset purge must roll back to IMPORTED");
-        assertEquals(DatasetStatus.DELETING, okReloaded.getStatus(),
-                "Sibling dataset purge must commit DELETING independently via REQUIRES_NEW");
+        assertTrue(datasetRepository.findById(succeedingDs.getId()).isEmpty(),
+                "Sibling dataset purge must commit its deletion independently via REQUIRES_NEW");
 
         Long failedAuditCount = jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM audit_log WHERE action_type = 'DATASET_AUTO_PURGED' AND target_id = ?",
